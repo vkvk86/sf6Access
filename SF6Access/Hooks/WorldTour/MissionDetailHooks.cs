@@ -51,6 +51,8 @@ public sealed class MissionDetailHooks : SingleParamScreenAdapter
         Add(parts, FlowHelper.Call(info, "GetTitleMessage") as string);
         Add(parts, FlowHelper.Call(info, "GetDetailMessage") as string);
 
+        DumpOnce(info);
+
         if (parts.Count == 0) return;
 
         string spoken = string.Join(". ", parts);
@@ -59,6 +61,30 @@ public sealed class MissionDetailHooks : SingleParamScreenAdapter
         API.LogInfo($"[SF6Access] Mission detail: {spoken}");
         Speak(spoken);
     }
+
+    /// <summary>Written once per session: everything this mission record can be asked. The
+    /// player's own objective ("go to the construction site") is a place, and the phone's
+    /// mission record is the one object the game hands us that is certainly ABOUT that
+    /// mission — so if a position or a target id is reachable at all, it shows up here.</summary>
+    private static void DumpOnce(ManagedObject info)
+    {
+        if (_dumped) return;
+        _dumped = true;
+        try
+        {
+            var td = info.GetTypeDefinition();
+            var sb = new System.Text.StringBuilder($"# mission device info {td?.FullName ?? "?"}\n");
+            ObjectDumper.DumpFieldsWithValues(sb, td, info, "#   ");
+            sb.AppendLine("# getters:");
+            ObjectDumper.DumpGetters(sb, td, info, "#   ");
+            string path = System.IO.Path.Combine(ObjectDumper.DumpDir, "sf6access_missiondetail.txt");
+            System.IO.File.WriteAllText(path, sb.ToString(), new System.Text.UTF8Encoding(false));
+            API.LogInfo($"[SF6Access] Mission detail: wrote record shape to {path}");
+        }
+        catch { }
+    }
+
+    private static bool _dumped;
 
     private static void Add(List<string> parts, string raw)
     {

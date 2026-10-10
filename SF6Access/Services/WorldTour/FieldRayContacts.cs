@@ -176,6 +176,34 @@ internal static class FieldRayContacts
         return HitClass.Wall;
     }
 
+    /// <summary><b>The nearest contact of the cast just made, whatever it was classified
+    /// as.</b> <see cref="Gather"/> drops ground and ceiling on purpose — a horizontal
+    /// beam that skims the street must not report the pavement as a wall — but the floor
+    /// probe wants exactly the contact it drops: it casts straight DOWN to ask where the
+    /// ground is, and the ground is the answer.
+    ///
+    /// <para>False means the cast found nothing at all, which is the hole a gap is made
+    /// of; it is never a floor at distance 0.</para></summary>
+    internal static bool Nearest(ManagedObject result, out float distance)
+    {
+        distance = 0f;
+        if (result == null || _getContactPoint == null) return false;
+        int n = FieldProbeService.ContactCount(result);
+        for (uint i = 0; i < n; i++)
+        {
+            object cp = null;
+            try { cp = _getContactPoint.InvokeBoxed(typeof(object), result, new object[] { i }); }
+            catch { }
+            if (!(cp is UnifiedObject uo)) continue;
+            BindFields(uo);
+            float d = FieldProbeService.ToFloat(Read(_fDistance, uo, typeof(float)));
+            // A distance of 0 is a failed read, not a contact at the ray's origin.
+            if (!float.IsFinite(d) || d <= 0f) continue;
+            if (distance <= 0f || d < distance) distance = d;
+        }
+        return distance > 0f;
+    }
+
     /// <summary>Whether contact <paramref name="i"/> stands on a level layer, and which
     /// GameObject owns it. SF6 publishes no <c>isFixedObject</c> (what the RE7 mod used
     /// to tell props from architecture), so the collision LAYER separates them here —

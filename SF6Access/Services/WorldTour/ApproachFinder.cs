@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using REFrameworkNET;
 using SF6Access.Services;
 using SF6Access.Hooks.WorldTour;
@@ -64,16 +65,32 @@ public static class ApproachFinder
 
     // How far through the candidate list we are, and the answer if we have one.
     private static int _probe;
+    /// <summary>How many candidates the list currently being walked actually holds. Set on every
+    /// probe from the list itself; see <see cref="Exhausted"/>.</summary>
+    private static int _total;
     private static bool _found;
     private static float _ax, _ay, _az;
     private static bool _exhaustedLogged;
 
-    /// <summary>Total candidates: the point below, then two rings of eight.</summary>
-    private static int CandidateCount => 1 + 2 * FieldHeadingService.SECTORS;
+    /// <summary>Total candidates per height: the objective's own footprint, then two rings of
+    /// <see cref="FieldHeadingService.SECTORS"/> points around it. Asked at the objective's own
+    /// height and at the player's — see <see cref="Candidates"/>.</summary>
+    private static int FootprintCount => 2 * (1 + 2 * FieldHeadingService.SECTORS);
 
     /// <summary>True once a reachable stand-in has been found for the current
     /// objective.</summary>
     public static bool HasSubstitute => _found;
+
+    /// <summary>Every candidate this search has to offer has been asked and none of them routed: there
+    /// is nothing walkable near the objective at either height.
+    ///
+    /// <para><b>Counted against the list actually built, never a constant.</b> The candidate list
+    /// is one height's worth when the objective is on the player's own floor and two heights'
+    /// worth when it is not (see <see cref="Candidates"/>), so <see cref="FootprintCount"/> — the
+    /// upper bound — would never be reached on the short list and this would stay false for ever.
+    /// Exhausted being false is what keeps the beacon saying "searching" instead of reporting
+    /// anything, so getting it wrong here does not misinform, it silences.</para></summary>
+    public static bool Exhausted => !_found && _probe >= _total && _probe > 0;
 
     /// <summary>The player has stood at the stand-in; from then on it has done its job (cleared with the search).</summary>
     public static bool Arrived { get; private set; }
@@ -98,51 +115,98 @@ public static class ApproachFinder
     {
         Retarget(tx, ty, tz, py);
         if (_found) return true;
-        if (_probe >= CandidateCount)
+        var candidates = Candidates(tx, ty, tz, py);
+        _total = candidates.Count;
+        if (_probe >= candidates.Count)
         {
             if (!_exhaustedLogged)
             {
                 _exhaustedLogged = true;
                 API.LogInfo($"[SF6Access] Approach: no reachable stand-in within {RING_B_M:0} m of " +
-                            $"({tx:0.0}, {ty:0.0}, {tz:0.0}) after {CandidateCount} probes");
+                            $"({tx:0.0}, {ty:0.0}, {tz:0.0}) after {candidates.Count} probes");
             }
             return false;
         }
 
-        Candidate(_probe, tx, tz, py, out float cx, out float cz);
+        var c = candidates[_probe];
         _probe++;
 
-        var answer = FieldNavPath.TryReach(cx, py, cz);
+        // The candidate's OWN height, not the player's. See Candidates: a ring asked only at the
+        // player's level answered questions about the roof they were standing on, never about the
+        // floor the objective was actually on.
+        var answer = FieldNavPath.TryReach(c.x, c.y, c.z);
         // Throttled means the query never ran, and a player off the navmesh (on a ladder,
         // mid-jump) says nothing about the candidate: give it back for the next tick.
         if (answer.Throttled || (answer.Ok && answer.StartOffMesh)) { _probe--; return false; }
         if (!answer.Ok || !answer.Exists || answer.PathM > longestM) return false;
 
         _found = true;
-        _ax = cx; _ay = py; _az = cz;
-        API.LogInfo($"[SF6Access] Approach: probe {_probe} of {CandidateCount} reached " +
-                    $"({cx:0.0}, {py:0.0}, {cz:0.0}) - guiding there instead of the objective, " +
+        _ax = c.x; _ay = c.y; _az = c.z;
+        API.LogInfo($"[SF6Access] Approach: probe {_probe} of {candidates.Count} reached " +
+                    $"({c.x:0.0}, {c.y:0.0}, {c.z:0.0}) - guiding there instead of the objective, " +
                     "which is on a disconnected piece of navmesh");
         return true;
     }
 
-    /// <summary>Candidate <paramref name="index"/>: 0 is the ground directly under
-    /// the objective, then two rings of <see cref="FieldHeadingService.SECTORS"/>
-    /// points around it.</summary>
-    private static void Candidate(int index, float tx, float tz, float py,
-                                  out float cx, out float cz)
+    /// <summary>Every candidate, in the order they are asked: <b>every one of them at the
+    /// objective's own height first, then the same set at the player's</b> — 2026-10-07, and this
+    /// is the single change that makes a destination seven metres below reachable at all.
+    ///
+    /// <para>Until now every candidate was asked at the PLAYER'S height. Stand on the roof of the
+    /// thing you are going to and what do you learn? That the roof is walkable, all seventeen
+    /// times. The ground the objective stands on — the only question worth asking — was never
+    /// put to the engine even once, so "the nearest reachable place" was always a place on the
+    /// wrong floor, and a destination a sighted player simply walks down to came back as one
+    /// with no route to it.</para>
+    ///
+    /// <para><b>The player's own height stays in the list, second.</b> Dropping it would have been
+    /// cheaper and it would have been a mistake: the objective's Y is whatever its designer gave
+    /// the object's origin, and it hangs off the real floor often enough that the old height is
+    /// sometimes the ONLY one the navmesh answers. Ask the objective's floor first so it wins
+    /// whenever both route, and ask the player's afterwards so nothing the search used to find
+    /// can be lost. One tier at a time, each shortest-first inside itself.</para></summary>
+    private static List<(float x, float y, float z, float d)> Candidates(float tx, float ty, float tz, float py)
     {
-        if (index == 0) { cx = tx; cz = tz; return; }
+        var list = new List<(float x, float y, float z, float d)>();
+        foreach (float y in Heights(ty, py))
+        {
+            var tier = Tier(tx, y, tz, ty);
+            tier.Sort((a, b) => a.d.CompareTo(b.d));
+            list.AddRange(tier);
+        }
+        return list;
+    }
+
+    /// <summary>One height's worth of stand-ins: the objective's own footprint, then two rings of
+    /// <see cref="FieldHeadingService.SECTORS"/> points around it. Each carries how far it really
+    /// is from the objective, so the nearest is asked first.</summary>
+    private static List<(float x, float y, float z, float d)> Tier(float tx, float y, float tz, float ty)
+    {
+        var list = new List<(float x, float y, float z, float d)>
+        {
+            (tx, y, tz, Dist(tx, y, tz, tx, ty, tz)),
+        };
 
         int n = FieldHeadingService.SECTORS;
-        int ring = (index - 1) / n;
-        int step = (index - 1) % n;
-        float radius = ring == 0 ? RING_A_M : RING_B_M;
-        double angle = 2.0 * Math.PI * step / n;
-
-        cx = tx + (float)(Math.Sin(angle) * radius);
-        cz = tz + (float)(Math.Cos(angle) * radius);
+        for (int ring = 0; ring < 2; ring++)
+            for (int step = 0; step < n; step++)
+            {
+                float radius = ring == 0 ? RING_A_M : RING_B_M;
+                double angle = 2.0 * Math.PI * step / n;
+                float x = tx + (float)(Math.Sin(angle) * radius), z = tz + (float)(Math.Cos(angle) * radius);
+                list.Add((x, y, z, Dist(x, y, z, tx, ty, tz)));
+            }
+        return list;
     }
+
+    /// <summary>Heights this close together are one floor: asking the same ring twice buys
+    /// nothing and costs a quarter of a second a candidate.</summary>
+    private const float SameHeightM = 0.25f;
+
+    /// <summary>The two heights worth asking about: where the objective is, and where the player
+    /// is. One rather than two when they are within a few centimetres of each other.</summary>
+    private static float[] Heights(float ty, float py)
+        => Math.Abs(ty - py) < SameHeightM ? new[] { ty } : new[] { ty, py };
 
     /// <summary>Start over when the objective is somewhere else, or the player on another
     /// floor (after a ladder): a stand-in found from elsewhere is a confident walk to the
@@ -160,8 +224,17 @@ public static class ApproachFinder
         Arrived = false;
         _tx = tx; _ty = ty; _tz = tz; _py = py;
         _probe = 0;
+        _total = 0;
         _found = false;
         _exhaustedLogged = false;
+    }
+
+    /// <summary>Three-dimensional distance, so the order of the candidates is decided by how far
+    /// each one really is from the objective — including the seven metres that separate floors.</summary>
+    private static float Dist(float ax, float ay, float az, float bx, float by, float bz)
+    {
+        float dx = bx - ax, dy = by - ay, dz = bz - az;
+        return MathF.Sqrt(dx * dx + dy * dy + dz * dz);
     }
 
     /// <summary>Forget everything (left the field, new city).</summary>
@@ -170,5 +243,6 @@ public static class ApproachFinder
         _have = _found = _exhaustedLogged = false;
         Arrived = false;
         _probe = 0;
+        _total = 0;
     }
 }

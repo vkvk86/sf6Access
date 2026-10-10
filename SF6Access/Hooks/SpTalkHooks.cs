@@ -74,7 +74,11 @@ public class SpTalkHooks
         }
         if (data == null) return;
 
-        string dialogue = FlowHelper.CleanTags(FlowHelper.ResolveGuidField(data, "mTextDialogueGuid"));
+        // cleanTags:false keeps inline icon tags so SpeakableIcons can voice the
+        // key names in tutorial-style lines ("用<ICON …>向路人申请对战");
+        // CleanTags afterwards removes anything left.
+        string dialogue = FlowHelper.CleanTags(FlowHelper.SpeakableIcons(
+            FlowHelper.ResolveGuidField(data, "mTextDialogueGuid", cleanTags: false)));
         if (string.IsNullOrEmpty(dialogue) || dialogue == _lastDialog) return;
         _lastDialog = dialogue;
 
@@ -82,7 +86,8 @@ public class SpTalkHooks
         // so toggling back on doesn't re-read the line that was just skipped.
         if (!FlowHelper.AreSubtitlesEnabled()) return;
 
-        string name = FlowHelper.CleanTags(FlowHelper.ResolveGuidField(data, "mTextNameGuid"));
+        string name = FlowHelper.CleanTags(FlowHelper.SpeakableIcons(
+            FlowHelper.ResolveGuidField(data, "mTextNameGuid", cleanTags: false)));
         string announcement = string.IsNullOrEmpty(name) ? dialogue : $"{name}: {dialogue}";
         API.LogInfo($"[SF6Access] NPC talk: {announcement}");
         ScreenReaderService.Speak(announcement);

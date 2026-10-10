@@ -57,6 +57,7 @@ public static class ZoneNameService
         _lastSection = default;
         _refreshedAt = 0;
         _sectionNames.Clear();
+        _namesByKey.Clear();
         _sectionMisses.Clear();
         _sectionsBuilt = false;
         _sectionsAt = 0;
@@ -120,6 +121,11 @@ public static class ZoneNameService
     // Section id -> localized name. Successes only; a miss is retried on EMPTY_RETRY_MS so
     // one unlucky read during the city load does not silence a district for the session.
     private static readonly Dictionary<uint, string> _sectionNames = new();
+    // Dictionary key -> name. The key IS NOT the section id: the table is keyed by a
+    // ManageId in the hundreds (401, 410, 446...) while the record's own `id` field is a
+    // small number (1..115) — and `CitySectionManager.CurrentSectionId` answers the KEY.
+    // Filed separately, so AllSectionNames() keeps one entry per district (2026-10-02).
+    private static readonly Dictionary<uint, string> _namesByKey = new();
     private static readonly Dictionary<uint, long> _sectionMisses = new();
     private static uint _sectionCity;
     private static bool _sectionsBuilt;
@@ -129,19 +135,11 @@ public static class ZoneNameService
     public static string SectionName(uint sectionId)
     {
         if (sectionId == 0) return null;
-
-        uint city = WorldTourStateService.CityId;
-        if (city != _sectionCity)
-        {
-            _sectionNames.Clear();
-            _sectionMisses.Clear();
-            _sectionCity = city;
-            _sectionsBuilt = false;
-            _sectionsAt = 0;
-        }
-
+        NoteCity();
         if (!_sectionsBuilt) BuildSectionNames();
         if (_sectionNames.TryGetValue(sectionId, out string name)) return name;
+        // The id the game reports while walking is the dictionary KEY, not the record's id.
+        if (_namesByKey.TryGetValue(sectionId, out name)) return name;
 
         // Not found by enumeration: ask the table by key, trusting it only when the record's
         // own id agrees (the dictionary is keyed by ManageId). A miss is remembered for
@@ -154,6 +152,29 @@ public static class ZoneNameService
         return name;
     }
 
+    /// <summary>Every section the table names in this city, id -> localized name. The
+    /// destination picker needs the whole set, not just the one the player is in
+    /// (<see cref="SectionCatalog"/> turns these into places that can be walked to).</summary>
+    public static IReadOnlyDictionary<uint, string> AllSectionNames()
+    {
+        NoteCity();
+        if (!_sectionsBuilt) BuildSectionNames();
+        return _sectionNames;
+    }
+
+    // The table is per city: a new city invalidates every name read so far.
+    private static void NoteCity()
+    {
+        uint city = WorldTourStateService.CityId;
+        if (city == _sectionCity) return;
+        _sectionNames.Clear();
+        _namesByKey.Clear();
+        _sectionMisses.Clear();
+        _sectionCity = city;
+        _sectionsBuilt = false;
+        _sectionsAt = 0;
+    }
+
     private static string KeyedName(uint sectionId)
     {
         var dict = FlowHelper.GetTableDict(SECTION_DICT);
@@ -162,7 +183,9 @@ public static class ZoneNameService
         catch { return null; }
         if (!present) return null;
         var record = FlowHelper.GetTableRecord(SECTION_DICT, SECTION_RECORD, sectionId);
-        return record == null || FlowHelper.ReadUIntField(record, "id") != sectionId ? null : RecordName(record);
+        // Not the record's `id` check there was: a key of 401 holds a record whose id is
+        // 1, and demanding they agree made every live section unnameable.
+        return record == null ? null : RecordName(record);
     }
 
     /// <summary>Reads every record once per city and files it under its own id. Keys are
@@ -193,7 +216,10 @@ public static class ZoneNameService
             var record = FlowHelper.GetTableRecord(SECTION_DICT, SECTION_RECORD, key);
             uint id = record == null ? 0 : FlowHelper.ReadUIntField(record, "id");
             string name = id == 0 ? null : RecordName(record);
-            if (!string.IsNullOrEmpty(name)) _sectionNames[id] = name;
+            if (string.IsNullOrEmpty(name)) continue;
+            _sectionNames[id] = name;
+            // Also under the key, for the id the game reports while the player walks.
+            if (key != id) _namesByKey[key] = name;
         }
 
         _sectionsBuilt = _sectionNames.Count > 0;
@@ -232,4 +258,29 @@ public static class ZoneNameService
     private static string Message(ManagedObject record, string fieldName) =>
         FlowHelper.CleanTags(FlowHelper.ResolveGuidField(
             AvatarFieldReader.GetProp(record, fieldName), "GUID"))?.Trim();
+
+    // Names of cities the player is NOT in, so a remembered place can say which city it stands in
+    // instead of only "somewhere else". Cached per id: the table read costs a round trip and a
+    // city's name does not change. Kept apart from the current city's cache above, so asking for
+    // another city never evicts the one the "where am I" readout is using.
+    private static readonly Dictionary<uint, string> _otherCityNames = new();
+    private static readonly HashSet<uint> _otherCityMissed = new();
+
+    /// <summary>The game's own name for a city id, or null when it cannot be read.</summary>
+    public static string CityNameOf(uint cityId)
+    {
+        if (cityId == 0) return null;
+        if (_otherCityNames.TryGetValue(cityId, out string cached)) return cached;
+        if (_otherCityMissed.Contains(cityId)) return null;
+        try
+        {
+            var record = FlowHelper.GetTableRecord(CITY_DICT, CITY_RECORD, cityId);
+            string name = Message(record, "CityName") ?? Message(record, "CityUIName");
+            if (!string.IsNullOrEmpty(name)) { _otherCityNames[cityId] = name; return name; }
+        }
+        catch { }
+        _otherCityMissed.Add(cityId);
+        API.LogInfo($"[SF6Access] Zone: no city name for id {cityId}");
+        return null;
+    }
 }

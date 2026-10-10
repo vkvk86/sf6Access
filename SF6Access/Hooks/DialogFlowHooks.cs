@@ -99,8 +99,8 @@ public sealed class DialogFlowHooks : ScreenAdapter
             }
 
             var preview = FlowHelper.GetObjectField(param, "Preview");
-            string title = FlowHelper.ReadGuiText(FlowHelper.GetObjectField(preview, "TitleText"));
-            string desc = FlowHelper.ReadGuiText(FlowHelper.GetObjectField(preview, "DescriptionText"));
+            string title = ResolveMessageText(FlowHelper.ReadGuiTextRaw(FlowHelper.GetObjectField(preview, "TitleText")));
+            string desc = ResolveMessageText(FlowHelper.ReadGuiTextRaw(FlowHelper.GetObjectField(preview, "DescriptionText")));
 
             string text = !string.IsNullOrEmpty(title) && !string.IsNullOrEmpty(desc)
                 ? $"{title}. {desc}"
@@ -117,17 +117,32 @@ public sealed class DialogFlowHooks : ScreenAdapter
     private void AnnounceDialogText(ManagedObject param, string foundType)
     {
         // Resolve platform tags first: the Steam-store dialog's whole message
-        // is a <PLATMSG> tag that plain tag stripping erased ("Confirmation")
-        string title = FlowHelper.CleanTags(FlowHelper.ResolvePlatformTags(
-            FlowHelper.ReadStringField(param, "TitleMessage")));
-        string message = FlowHelper.CleanTags(FlowHelper.ResolvePlatformTags(
-            FlowHelper.ReadStringField(param, "Message")));
+        // is a <PLATMSG> tag that plain tag stripping erased ("Confirmation").
+        // SpeakableIcons must run too: tips name their buttons with inline
+        // <INPT id=…> tags, and the WT item-use tip read "按打开暂停菜单" — the
+        // button name was stripped to nothing (2026-09-29 log evidence).
+        string rawTitleField = FlowHelper.ReadStringField(param, "TitleMessage");
+        string rawMessageField = FlowHelper.ReadStringField(param, "Message");
+        LogRawTags("TitleMessage", rawTitleField);
+        LogRawTags("Message", rawMessageField);
+        string title = ResolveMessageText(rawTitleField);
+        string message = ResolveMessageText(rawMessageField);
 
-        // Tips/help windows keep their text in via.gui.Text components instead
+        // Tips/help windows keep their text in via.gui.Text components instead.
+        // ReadGuiText pre-strips tags (losing the buttons); read the RAW text
+        // and run the full resolve pipeline on it.
         if (string.IsNullOrEmpty(title))
-            title = ResolveMessageText(FlowHelper.ReadGuiText(FlowHelper.GetObjectField(param, "TitleText")));
+        {
+            string raw = FlowHelper.ReadGuiTextRaw(FlowHelper.GetObjectField(param, "TitleText"));
+            LogRawTags("TitleText", raw);
+            title = ResolveMessageText(raw);
+        }
         if (string.IsNullOrEmpty(message))
-            message = ResolveMessageText(FlowHelper.ReadGuiText(FlowHelper.GetObjectField(param, "Text")));
+        {
+            string raw = FlowHelper.ReadGuiTextRaw(FlowHelper.GetObjectField(param, "Text"));
+            LogRawTags("Text", raw);
+            message = ResolveMessageText(raw);
+        }
 
         // The authoritative tip body: each page's PageData carries the body +
         // title as message Guids (ArrPage[current].Message / .TitleMessage). This
@@ -238,6 +253,22 @@ public sealed class DialogFlowHooks : ScreenAdapter
             FlowHelper.ResolvePlatformTags(raw)));
     }
 
+    /// <summary>Diagnostic: log each distinct raw dialog text that still carries
+    /// tags, once per distinct string (same pattern as MessageWindowHooks) —
+    /// proves which tag family a dialog uses and what SpeakToken should map.</summary>
+    private static readonly System.Collections.Generic.HashSet<string> _loggedRawDialogs = new();
+
+    private static void LogRawTags(string source, string raw)
+    {
+        try
+        {
+            if (string.IsNullOrEmpty(raw) || raw.IndexOf('<') < 0) return;
+            if (_loggedRawDialogs.Add(source + "|" + raw))
+                API.LogInfo($"[SF6Access] Dialog raw [{source}]: {raw}");
+        }
+        catch { }
+    }
+
     /// <summary>The current tip page's body from PageData message Guids
     /// (ArrPage[current].Message), plus its title into <paramref name="title"/>
     /// when the param carried none. Null when unavailable.</summary>
@@ -333,7 +364,7 @@ public sealed class DialogFlowHooks : ScreenAdapter
                 if (arr != null && idx < FlowHelper.GetListCount(arr))
                 {
                     var raw = FlowHelper.Call(arr, "Get", idx) as string;
-                    label = FlowHelper.CleanTags(raw);
+                    label = FlowHelper.CleanTags(FlowHelper.SpeakableIcons(raw));
                 }
             }
 

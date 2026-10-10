@@ -170,6 +170,11 @@ public class MainMenuHooks
                 DeathMatchSettingHooks.IsInDeathMatchSetting ||
                 StatusMenuHooks.IsInStatusMenu ||
                 AvatarCreateHooks.IsInAvatarCreator ||
+                // The phone's Messages app and its passcode screen: the generic
+                // reader was announcing raw control names ("p_FaceIconItem_0")
+                // and repeating the first contact over them.
+                SF6Access.Hooks.WorldTour.DeviceIMHooks.IsActive ||
+                SF6Access.Hooks.WorldTour.IMPasscodeHooks.IsActive ||
                 // Exception: the use-item confirm popup's Yes/No buttons only
                 // ever surface through this generic reader — don't mute them
                 (WTMPauseHooks.IsInWTMPause && !WTMPauseHooks.IsItemConfirmOpen) ||

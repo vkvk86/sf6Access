@@ -48,6 +48,13 @@ menus name items `c_item_N` (not just dialogs) — read the subtree text, use Ye
 ### Dialogs (`DialogHooks`, `DialogFlowHooks`, `TextInputDialogHooks`)
 - `app.UIFlowDialog.MessageBoxParam` — corrupt-save / autosave-caution / generic message boxes.
   `Message` may be `<PLATMSG Arg0="65">` → `FlowHelper.ResolvePlatformTags` BEFORE `CleanTags`.
+- `app.UIFlowDialog.TipsParam` — World Tour tutorial tips (e.g. "危急时刻使用物品" item-use tip).
+  Its `Message` field carries inline `<INPT id=…>` button tags; the announcement pipeline must be
+  `ResolveMessageText` (= CleanTags∘SpeakableIcons∘ResolvePlatformTags). Bare
+  `CleanTags(ResolvePlatformTags(...))` stripped the buttons to empty gaps ("按打开暂停菜单" with
+  the key name silent, 2026-09-29 log). GUI-component fallbacks (`TitleText`/`Text`) must read via
+  `FlowHelper.ReadGuiTextRaw` — `ReadGuiText` pre-strips tags and the keys are unrecoverable after.
+  `DialogHooks.TryGetDialogText` and the button-label fallback run `SpeakableIcons` too.
 - `DialogManager.get_IsShowDialog()` is unreliable (misses UIStartMenu exit confirm; false-positives
   on option sub-lists where `GetEnableLineData` is null). Prefer reading buttons via subtree text.
 
@@ -2684,7 +2691,10 @@ action-guide labels); the explicit vertical connector is the ladder gimmick
 3. `LevelRoutePlanner` asks one question per free query slot (`FieldNavPath.TryConnect`, shared
    250 ms limiter), with union-find so answers are reused. One ladder first — its end nearest the
    target must connect to the target, its other end to the player — then two chained ladders.
-   Candidates are ordered by straight-line detour. Budget: 48 answers, 96 raw queries.
+   Candidates are ordered by straight-line detour. Budget: 120 answers, 240 raw queries (raised from
+   48 on 2026-09-29; endpoint nudges are not charged, so a cut search no longer looks like a partial
+   plan the search never earned — `Pump` logs `question budget spent (…)`). See
+   `wt-orientation.md` § "Ladder-search budget".
 4. An endpoint the engine reports off-mesh (`StartNodeNotFound`/`DestNodeNotFound`) is retried
    moved one stride (1 m) along ±X/±Z; a moved spot that answers replaces the ladder end. A target
    that is itself off-mesh first re-asks the direct walk with the moved target; if no move puts it
@@ -3097,10 +3107,14 @@ type with `start`/`end` (`p0`/`p1`). No navmesh raycast exists anywhere in `via.
 (exhaustive grep). Physics shape casts: `via.physics.System.castCapsule(Capsule, vec3, vec3,
 FilterInfo, ShapeCastResult)` and `castSphere(...)` (+ `uint options` overloads).
 
-> **Do not build auto-walk / teleport, and do not replace the radar (user decisions 2026-09-12).**
-> The player-movement leads in the next three paragraphs are recorded as facts only; nothing may
-> move the avatar. The navigation direction is "keep the radar, improve it" —
-> `docs/wt-radar-improvements.md`.
+> **Auto-walk is being built (user request 2026-09-29). The radar still stands.**
+> The 2026-09-12 decision — "do not build auto-walk / teleport, and do not replace
+> the radar" — is **superseded on its first half only**: the user asked for
+> "选中任务目标以后角色自动走过去，包括绕行、爬梯子". The radar is unchanged (it is
+> what the player uses when not auto-walking). The player-movement leads below are
+> now ACTIVE research, not facts-in-passing. Plan, the one blocking unknown
+> (`SetMove`'s coordinate space) and the staged approach: `docs/wt-autowalk.md`.
+> Stage 1 (read-only probe, F9) is deployed.
 
 **Player is driven by a navigation controller.** `app.worldtour.avatar.AvatarPlayerControll :
 AvatarNaviControllBase : AvatarControllBase` (the only other subclasses are `WTNpcAI` and

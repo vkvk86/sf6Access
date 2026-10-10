@@ -453,4 +453,45 @@ public static class LocalizedText
     /// <summary>The route pathfinder was switched off; beacons point straight at
     /// the target again.</summary>
     public static string PathfinderOff() => LangFile.Get("wt.pathfinder_off", "Route guidance off");
+
+    // ==================== my status (L3 / H) ====================
+
+    /// <summary>"Health {0}, maximum {1}" — current hit points and their cap.</summary>
+    public static string StatusHpFull()
+        => LangFile.Get("status.hp_full", "生命值 {0}，上限 {1}");
+
+    /// <summary>"Health" — the avatar's current hit points (no cap available).</summary>
+    public static string StatusHp() => LangFile.Get("status.hp", "生命值");
+
+    /// <summary>"Miles" — 里程, the World Tour counter spent to revive after a
+    /// defeat and to reset the skill tree (the owner's description).</summary>
+    public static string StatusMile() => LangFile.Get("status.mile", "里程");
+
+    /// <summary>"Zenny" — the World Tour currency. A proper noun, kept as is.</summary>
+    public static string StatusZenny() => LangFile.Get("status.zenny", "Z币");
+
+    /// <summary>"Level" — the avatar's World Tour level.</summary>
+    public static string StatusLevel() => LangFile.Get("status.level", "等级");
+
+    /// <summary>"Experience" — accumulated experience points.</summary>
+    public static string StatusExp() => LangFile.Get("status.exp", "经验");
+
+    /// <summary>"Skill points" — the unspent remainder (total minus used).</summary>
+    public static string StatusSkillPoint() => LangFile.Get("status.skillpoint", "技能点");
+
+    /// <summary>"Focus" — the Focus / Drive gauge level.</summary>
+    public static string StatusFocus() => LangFile.Get("status.focus", "集中");
+
+    /// <summary>"Super Art" — the Super Art gauge level.</summary>
+    public static string StatusSuperArt() => LangFile.Get("status.superart", "超必杀");
+
+    /// <summary>"Chapter {0}" — the story chapter the avatar is in.</summary>
+    public static string StatusChapter() => LangFile.Get("status.chapter", "第 {0} 章");
+
+    /// <summary>Separator between the numbers of the status line.</summary>
+    public static string StatusJoin() => LangFile.Get("status.join", "，");
+
+    /// <summary>Spoken when not a single number could be read — never a zero,
+    /// because a zero would be acted on.</summary>
+    public static string StatusNone() => LangFile.Get("status.none", "现在读不到你的状态");
 }

@@ -27,6 +27,54 @@ public static partial class FieldNavPath
     /// <para>Every attribute is asked by NAME out of the TDB, never by ordinal, and the
     /// verdict is logged once per distinct reason so a long walk past an unreachable
     /// objective does not flood the log.</para></summary>
+    /// <summary><b>What the engine said about a point, in a form a caller can act on.</b>
+    ///
+    /// <para>The three cases are not the same kind of fact, and the difference is the whole
+    /// reason a walk must ask before it starts:</para>
+    /// <list type="bullet">
+    /// <item><c>Reachable</c> — the engine found a walkable route. Safe to walk.</item>
+    /// <item><c>Unreachable</c> — <c>PathNotFound</c>. The destination is ON the mesh and no
+    /// walkable link reaches it: an upper floor, a roof, a room behind a scripted transition.
+    /// <b>This is the game's answer and must be respected.</b> Starting a walk at a point the
+    /// engine has already said is unreachable is exactly how a request ends up pushing a blind
+    /// player into a wall.</item>
+    /// <item><c>OffMesh</c> — the destination never resolved to a node at all (a roof, inside
+    /// geometry). Different problem, possibly fixable by aiming somewhere else, but not
+    /// walkable as asked.</item>
+    /// <item><c>Unknown</c> — no answer was obtained: rate-limited, the player is off the mesh
+    /// themselves, or the query faulted. <b>Must not be treated as either of the above.</b></item>
+    /// </list>
+    ///
+    /// <para>Derived from <see cref="Diagnose"/>, which reads <c>FailReport</c> by name, so the
+    /// two cannot drift apart: this is a classification of the same verdict the log already
+    /// prints in full.</para></summary>
+    public enum Reachability
+    {
+        /// <summary>No answer — the caller must not read this as walkable OR as blocked.</summary>
+        Unknown = 0,
+        /// <summary>The engine found a route.</summary>
+        Reachable = 1,
+        /// <summary>On the mesh, and provably no walk reaches it (upper floor / behind a door).</summary>
+        Unreachable = 2,
+        /// <summary>The destination point itself is not on the navmesh.</summary>
+        OffMesh = 3,
+        /// <summary>The PLAYER is not on the navmesh; nothing can be routed until they are.</summary>
+        PlayerOffMesh = 4,
+    }
+
+    /// <summary>Classify a verdict string from <see cref="Diagnose"/>.</summary>
+    private static Reachability Classify(string verdict)
+    {
+        if (string.IsNullOrEmpty(verdict)) return Reachability.Unknown;
+        // Order matters: a verdict naming both the player's node and the destination's must be
+        // read as the player's problem first, because that is the one the caller cannot route
+        // around by choosing a different destination.
+        if (verdict.Contains("StartNodeNotFound")) return Reachability.PlayerOffMesh;
+        if (verdict.Contains("DestNodeNotFound")) return Reachability.OffMesh;
+        if (verdict.Contains("PathNotFound")) return Reachability.Unreachable;
+        return Reachability.Unknown;
+    }
+
     private static string Diagnose(ManagedObject report, bool log)
     {
         try

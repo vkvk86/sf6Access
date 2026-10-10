@@ -109,20 +109,40 @@ public sealed class MessageWindowHooks : ScreenAdapter
         {
             foreach (var t in GuiTextReader.ReadTextsByOwner(MESSAGE_WINDOW))
             {
-                if (t.Name == CONV_ELEMENT && !string.IsNullOrWhiteSpace(t.Text)) text = Flatten(t.Text);
-                else if (t.Name == NAME_ELEMENT && !string.IsNullOrWhiteSpace(t.Text)) speaker = Flatten(t.Text);
+                // Raw, not Text: Text is tag-stripped by GuiTextReader, and this
+                // window's lines name their buttons with inline icon tags
+                // ("用<ICON …>向路人申请对战" — the key sits between 用 and 向).
+                // Flatten voices the tags before cleaning, so the key is spoken.
+                string raw = t.Raw ?? t.Text;
+                LogRawTags(raw);
+                if (t.Name == CONV_ELEMENT && !string.IsNullOrWhiteSpace(t.Text)) text = Flatten(raw);
+                else if (t.Name == NAME_ELEMENT && !string.IsNullOrWhiteSpace(t.Text)) speaker = Flatten(raw);
             }
         }
         catch { }
         return (text, speaker);
     }
 
+    // Diagnostic: log each distinct tagged raw line once — if a key name is still
+    // missing after the SpeakableIcons fix, this shows whether the window's raw
+    // text carries the icon tag at all (it may be a separate image element, in
+    // which case a different reader is needed).
+    private static readonly System.Collections.Generic.HashSet<string> _loggedRaw = new();
+
+    private static void LogRawTags(string raw)
+    {
+        if (string.IsNullOrEmpty(raw) || !raw.Contains('<')) return;
+        if (_loggedRaw.Count > 100 || !_loggedRaw.Add(raw)) return;
+        API.LogInfo($"[SF6Access] MessageWindow raw: {raw}");
+    }
+
     /// <summary>Dialogue wraps across visual rows with embedded newlines, and the
     /// screen reader stops speaking at one — so a multi-row line would be read
-    /// only as far as its first break.</summary>
+    /// only as far as its first break. Icon tags are voiced (not stripped) so
+    /// "press [key]" sentences keep naming the key.</summary>
     private static string Flatten(string raw)
     {
-        string clean = FlowHelper.CleanTags(raw);
+        string clean = FlowHelper.CleanTags(FlowHelper.SpeakableIcons(raw));
         return string.IsNullOrEmpty(clean) ? null : clean.Replace('\n', ' ').Replace('\r', ' ').Trim();
     }
 }

@@ -10,7 +10,12 @@ public static class DestinationText
     public static string CategoryName(DestinationCategory category) => category switch
     {
         DestinationCategory.Mission => LangFile.Get("wt.dest.cat_mission", "Story objective"),
+        DestinationCategory.MissionHistory => LangFile.Get("wt.dest.cat_mission_history", "Earlier objectives"),
         DestinationCategory.Places => LangFile.Get("wt.dest.cat_places", "Places"),
+        DestinationCategory.Rest => LangFile.Get("wt.dest.cat_rest", "Rest stations"),
+        DestinationCategory.Sections => LangFile.Get("wt.dest.cat_sections", "Districts"),
+        DestinationCategory.Lift => LangFile.Get("wt.dest.cat_lift", "Lifts"),
+        DestinationCategory.Access => LangFile.Get("wt.dest.cat_access", "Ladders and doors nearby"),
         DestinationCategory.Shops => LangFile.Get("wt.dest.cat_shops", "Shops and services"),
         DestinationCategory.Masters => LangFile.Get("wt.dest.cat_masters", "Masters"),
         DestinationCategory.Missions => LangFile.Get("wt.dest.cat_missions", "Missions"),
@@ -69,6 +74,41 @@ public static class DestinationText
 
     public static string MissionEntry() => LangFile.Get("wt.dest.mission_entry", "Story objective");
 
+    /// <summary>One entry of the mission history: the mission's own title and its chapter — the
+    /// story's own numbering, not a count of list rows, so an entry keeps the same number after
+    /// another one is added ahead of it.
+    ///
+    /// <para>Every fallback still names something the player can tell apart. A mission whose title
+    /// the game never published (a zone objective is a place, and a place has no name) used to come
+    /// out as "剧情任务目标，第0章" — the same sentence for every one of them, and a chapter number
+    /// that is really "unknown" spoken as if it were chapter zero. With an id it says the id, so
+    /// two unnamed objectives are two different lines.</para></summary>
+    public static string MissionHistoryEntry(string name, int chapter, uint id)
+    {
+        if (!string.IsNullOrWhiteSpace(name))
+            // A chapter that was never read is 0, and "Beat Square, chapter 0" claims a chapter
+            // that does not exist. The name alone is the honest sentence.
+            return chapter > 0
+                ? string.Format(LangFile.Get("wt.dest.mission_history_named", "{0}, chapter {1}"), name.Trim(), chapter)
+                : name.Trim();
+        if (chapter > 0)
+            return string.Format(LangFile.Get("wt.dest.mission_history_unnamed", "Story objective, chapter {0}"), chapter);
+        if (id != 0)
+            return string.Format(LangFile.Get("wt.dest.mission_history_id", "Story objective {0}"), id);
+        return LangFile.Get("wt.dest.mission_history_noname", "Story objective");
+    }
+
+    /// <summary>Chosen, but the game no longer has the objective's position: the entry is there to
+    /// tell the player what the story has been through, not to be walked to.</summary>
+    public static string HistoryNoPlace() => LangFile.Get("wt.dest.history_no_place",
+        "That objective's place is no longer known - the game keeps no position for a finished mission");
+
+    /// <summary>Chosen, and its position IS on file — but in the other city. The history is shown
+    /// wherever the player is (a list that empties itself when they travel is worse than one that
+    /// lists a place they must travel to), so this says why it cannot be walked to from here.</summary>
+    public static string HistoryOtherCity() => LangFile.Get("wt.dest.history_other_city",
+        "That objective is in another city - travel there and it can be guided to");
+
     public static string SaveHereEntry() => LangFile.Get("wt.dest.save_here", "Save this spot");
 
     public static string Saved(string name) =>
@@ -78,6 +118,32 @@ public static class DestinationText
 
     public static string Deleted(string name) =>
         string.Format(LangFile.Get("wt.dest.deleted", "Deleted: {0}"), name);
+
+    /// <summary>What a scene object the registry leaves unnamed is called, taken from the
+    /// flags its type exposes — so a rest bench, the player's own front door and a
+    /// fast-travel point still reach the list under a name.</summary>
+    public static string OmHome() => LangFile.Get("wt.dest.om_home", "home");
+
+    public static string OmBodyShop() => LangFile.Get("wt.dest.om_bodyshop", "body shop");
+
+    public static string OmFastTravel() => LangFile.Get("wt.dest.om_fast_travel", "fast travel point");
+
+    /// <summary>What a rest station is called when the game has not named one for us in this
+    /// language yet. The phone map's own word for these icons is learned the first time one is
+    /// seen (<see cref="RestCatalog.Word"/>); this is the answer until then.</summary>
+    public static string RestStation() => LangFile.Get("wt.dest.rest", "rest station");
+
+    /// <summary>The kind word on a remembered station that stands in another city: "in Metro
+    /// City", or "in another city" when the city's own name cannot be read.</summary>
+    public static string RestOtherCity(string city) =>
+        string.IsNullOrEmpty(city)
+            ? LangFile.Get("wt.dest.rest_other_city", "in another city")
+            : string.Format(LangFile.Get("wt.dest.rest_in_city", "in {0}"), city);
+
+    /// <summary>Said when a remembered station in another city is chosen: it is not lost, it is
+    /// simply in the city the player has to travel back to.</summary>
+    public static string RestOtherCityChosen() => LangFile.Get("wt.dest.rest_other_city_chosen",
+        "That rest station is in another city - travel there and it can be guided to");
 
     /// <summary>"Beat Square, spot 3" — the name a saved spot gets.</summary>
     public static string SavedName(string zoneName, int number) =>

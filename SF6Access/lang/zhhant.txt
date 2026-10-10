@@ -1,4 +1,4 @@
-# SF6Access — 繁體中文。僅包含與英文 (en.txt) 不同的鍵。
+﻿# SF6Access — 繁體中文。僅包含與英文 (en.txt) 不同的鍵。
 damage=傷害
 price=價格
 completed=已完成
@@ -815,3 +815,17 @@ claimed=已領取
 not_claimed=未領取
 premium=高級
 free=免費
+wt.walk.stopped=自動行走已停止
+wt.walk.obstacle_breakable=有東西擋住了路。可破壞的物體在{0}點鐘方向，{1}公尺。打碎它，導航會自動繼續
+wt.walk.obstacle_unnamed=有東西擋住了路，而且看起來不是能打碎的。換個路線，或者稍後再按一次行走鍵
+
+wt.walk.unreachable_above=目標從這裡沒有可走的路過去，它大約在你上方{0}公尺。找找樓梯或者梯子
+wt.walk.unreachable=目標從這裡沒有可走的路過去。換個路線試試
+wt.walk.off_mesh=目標所在的位置遊戲根本無法走過去。試著選附近另一個地點
+wt.walk.player_off_mesh=你不在可行走的地面上，沒法規劃路線。稍站一下再試
+wt.walk.still_searching=還在算路線 — 遊戲正在找梯子。稍等一下再試
+wt.walk.ladder_partial_above=梯子是上去的路，但梯子上面的路線到不了目標。目標大約在你上方{0}公尺。能爬多少先爬上去，再找下一段路
+wt.walk.ladder_partial=梯子是上去的路，但梯子上面的路線到不了目標。能爬多少先爬上去，再找下一段路
+wt.walk.engine_walked=引擎導航正在帶你走。目前走了大約{0}公尺
+wt.walk.engine_ignored=遊戲接受了導航請求，但角色沒有動。請回報這個問題 — 說明請求內容有問題
+wt.walk.walked_backwards=角色走的是對的路線，但方向反了。正在換另一種座標編碼 — 請再按一次行走鍵

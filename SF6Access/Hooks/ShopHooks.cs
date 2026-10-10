@@ -1,3 +1,4 @@
+using System;
 using System.Collections.Generic;
 using REFrameworkNET;
 using SF6Access.Services;
@@ -39,7 +40,7 @@ public sealed class ShopHooks : ScreenAdapter
     // tracked for reading but never own the screen (their lists do).
     private const string STRENGTH_TARGET = "app.UIFlowShop.StrengthTarget.Param";
     private const string STRENGTH_RESULT = "app.UIFlowShop.StrengthResult.Param";
-    private static readonly string[] Types =
+    internal static readonly string[] Types =
         { TOP, BUY_GENERAL, BUY_APPAREL, SELL, STRENGTH_LIST, STRENGTH_MATERIAL, COLOR_LIST,
           COLOR_DETAIL, HUB_BUY, STRENGTH_TARGET, STRENGTH_RESULT };
 
@@ -421,6 +422,19 @@ public sealed class ShopHooks : ScreenAdapter
             }
         }
 
+        // Enhance material list: the detail pane keeps the text of ONE row while
+        // the cursor moves, so every material was announced under the same name.
+        // The product the cursor is on is authoritative (see ReadProductName).
+        if (_activeType == STRENGTH_MATERIAL)
+        {
+            string productName = ReadProductName(param);
+            if (!string.IsNullOrEmpty(productName))
+            {
+                API.LogInfo($"[SF6Access] Shop material name: product '{productName}' vs gui '{name}'");
+                name = productName;
+            }
+        }
+
         if (string.IsNullOrEmpty(name)) return null;
 
         string price = null;
@@ -448,13 +462,36 @@ public sealed class ShopHooks : ScreenAdapter
     }
 
     /// <summary>
-    /// The focused gear's stats, per screen. Enhance target/material lists: the
-    /// side pane's UIPartsPlayerEquipStatus (its stat captions are textures —
-    /// mLabelList gives StatusType + value). Buy lists: the item-vs-equipped
-    /// compare triplets in the list GUI; the product data as last resort.
+    /// The focused gear's stats, per screen. First choice everywhere is the
+    /// product the cursor is on (see <see cref="ReadProductStats"/>). Enhance
+    /// target/material lists then fall back to the side pane's
+    /// UIPartsPlayerEquipStatus (its stat captions are textures — mLabelList
+    /// gives StatusType + value). Buy lists: the item-vs-equipped compare
+    /// triplets in the list GUI; the product data as last resort.
+    /// <para>The pane used to come FIRST, and in the material list it does not
+    /// follow the cursor: it is the enhance RESULT pane, so it kept reporting
+    /// the numbers of the gear being enhanced (every material announced the
+    /// stats of a hat). Product data is the only source that tracks the
+    /// cursor, so it wins; the pane is a fallback.</para>
     /// </summary>
     private string ReadStatsForSelection(ManagedObject param, string name, string guiOwner)
     {
+        // 1) The product the cursor is on, straight from the game's own
+        // "which product is current" answer (ItemListBaseParam.
+        // GetCurrentProduct) — one product, its item params, and each param's
+        // own granted stats. No GUI, no index arithmetic: the compare panel
+        // recycles three row widgets and the two the focused piece does not
+        // fill keep whatever the PREVIOUS piece left in them, which is why
+        // every item announced the same "Defense 8, Kick 0".
+        string fromData = ReadProductStats(param);
+        if (fromData != null) return fromData;
+
+        // 2) The gear the shop itself is holding as "to equip" for the focused
+        // row (it previews the piece on the avatar).
+        fromData = ReadTryOnStats(param);
+        if (fromData != null) return fromData;
+
+        // 3) Enhance target / material side panes.
         var pane = _activeType == STRENGTH_LIST
             ? FlowHelper.GetObjectField(_strengthTarget, "_targetInfo")
             : _activeType == STRENGTH_MATERIAL
@@ -462,10 +499,185 @@ public sealed class ShopHooks : ScreenAdapter
                 : null;
         if (pane != null)
         {
-            return AvatarStatsReader.FormatStats(AvatarStatsReader.ReadStatsFromEquipStatusWidget(
+            string fromPane = AvatarStatsReader.FormatStats(AvatarStatsReader.ReadStatsFromEquipStatusWidget(
                 FlowHelper.GetObjectField(pane, "_playerEquipStatus")));
+            if (fromPane != null) return fromPane;
         }
+
+        // 4) The on-screen compare rows (weaker: stale rows — see above).
         return ReadCompareStats(guiOwner) ?? ReadItemDataStats(param, name);
+    }
+
+    /// <summary>
+    /// The stats of the product the cursor is on, read from the game's own
+    /// objects: <c>ItemListBaseParam.GetCurrentProduct()</c> → the product's
+    /// <c>_itemParamList</c> → <c>WTItemParam.GetEquipStatus()</c>. A set (a
+    /// costume sold as one product) is several item params and their values add
+    /// up, which is what the player sees when they put it on.
+    /// <para>This is the ONLY source that follows the cursor exactly. The
+    /// compare panel keeps three row widgets and refreshes only the ones the
+    /// focused piece actually uses, so a piece with one stat leaves two rows
+    /// holding the previous piece's numbers — announced, that reads as "every
+    /// item is the same".</para>
+    /// </summary>
+    private static string ReadProductStats(ManagedObject param)
+    {
+        try
+        {
+            var product = FlowHelper.Call(param, "GetCurrentProduct") as ManagedObject;
+            if (product == null) return null;
+
+            var items = FlowHelper.GetObjectField(product, "_itemParamList");
+            int count = FlowHelper.GetListCount(items);
+
+            var list = new List<ManagedObject>();
+            for (int i = 0; i < count; i++)
+            {
+                var itemParam = FlowHelper.GetListItem(items, i);
+                if (itemParam != null) list.Add(itemParam);
+            }
+            if (list.Count == 0) return null;
+
+            string stats = AvatarStatsReader.FormatStats(AvatarStatsReader.ReadStatsOfItemParams(list));
+            if (string.IsNullOrEmpty(stats)) return null;
+
+            var names = new List<string>();
+            foreach (var item in list)
+                names.Add(FlowHelper.CleanTags(FlowHelper.Call(item, "GetNameWithLevel") as string) ?? "?");
+            API.LogInfo($"[SF6Access] Shop stats from GetCurrentProduct " +
+                        $"({list.Count} of {count} item param(s)): {string.Join(" + ", names)} -> {stats}");
+            return stats;
+        }
+        catch (Exception ex)
+        {
+            API.LogInfo($"[SF6Access] Shop product stats failed: {ex.Message}");
+        }
+        return null;
+    }
+
+    /// <summary>
+    /// The name of the product the cursor is on, from the same objects the stats
+    /// come from: <c>WTItemParam.GetNameWithLevel()</c> for a single-piece
+    /// product, the product's own <c>_productName</c> for a set.
+    /// <para>Used where the GUI name goes stale. In the enhance MATERIAL list
+    /// every row announced the same name: the detail pane keeps the text of one
+    /// row while the cursor moves. The level suffix the game puts in
+    /// GetNameWithLevel is also the only thing that tells two stacks of the same
+    /// material apart — they are identical items at different levels.</para>
+    /// </summary>
+    private static string ReadProductName(ManagedObject param)
+    {
+        try
+        {
+            var product = FlowHelper.Call(param, "GetCurrentProduct") as ManagedObject;
+            if (product == null) return null;
+
+            string productName = FlowHelper.CleanTags(FlowHelper.ReadStringField(product, "_productName"));
+            var items = FlowHelper.GetObjectField(product, "_itemParamList");
+            int count = FlowHelper.GetListCount(items);
+
+            if (count == 1)
+            {
+                var itemParam = FlowHelper.GetListItem(items, 0);
+                string itemName = FlowHelper.CleanTags(FlowHelper.Call(itemParam, "GetNameWithLevel") as string)
+                                  ?? FlowHelper.CleanTags(FlowHelper.Call(itemParam, "GetName") as string);
+                if (!string.IsNullOrWhiteSpace(itemName)) return itemName.Trim();
+            }
+            return string.IsNullOrWhiteSpace(productName) ? null : productName.Trim();
+        }
+        catch { }
+        return null;
+    }
+
+    /// <summary>
+    /// The stats of the gear piece the shop is currently previewing, read from
+    /// the game's OWN item objects instead of the GUI: the param keeps the
+    /// WTItemParams it wants to equip in `_nowWantEquipItems_TryingOn` (and the
+    /// dressing-up twin). A set is several params — their values add up, which
+    /// is exactly what the GUI renders as "the same stat twice".
+    /// </summary>
+    private static string ReadTryOnStats(ManagedObject param)
+    {
+        try
+        {
+            // 1) The single piece the shop is previewing ("dressing up").
+            string stats = StatsOfItems(param, "_nowWantEquipItems_DressingUp", -1);
+            if (stats != null) return stats;
+
+            // 2) The whole previewed outfit — narrowed down to the slot the
+            // cursor is on. The array holds EVERY slot (seven of them), so
+            // summing it would announce the outfit, not the piece.
+            int slot = FlowHelper.ReadIntField(param, "_focusItem_EquipSlot", -1);
+            if (slot >= 0)
+            {
+                stats = StatsOfItems(param, "_nowWantEquipItems_TryingOn", slot);
+                if (stats != null) return stats;
+            }
+        }
+        catch (Exception ex)
+        {
+            API.LogInfo($"[SF6Access] Shop try-on stats failed: {ex.Message}");
+        }
+        return null;
+    }
+
+    /// <summary>
+    /// The stats of the item params in one of the shop's "want to equip" arrays.
+    /// With <paramref name="slotFilter"/> &gt;= 0 only the pieces that belong to
+    /// that equip slot count (that is how the focused piece is picked out of the
+    /// full outfit); when a piece's slot cannot be read the array is refused
+    /// rather than summed whole — the outfit total is not what a shopper asked
+    /// for. A set (a costume sold as one product) fills several slots, so more
+    /// than one piece may pass the filter and their values are added.
+    /// </summary>
+    private static string StatsOfItems(ManagedObject param, string field, int slotFilter)
+    {
+        var items = FlowHelper.GetObjectField(param, field);
+        int count = FlowHelper.GetListCount(items);
+        if (count <= 0) return null;
+
+        var list = new List<ManagedObject>();
+        for (int i = 0; i < count; i++)
+        {
+            var item = FlowHelper.GetListItem(items, i);
+            if (item == null) continue;
+            if (slotFilter >= 0)
+            {
+                int slot = EquipSlotOf(item);
+                if (slot < 0) return null;      // cannot tell — refuse the array
+                if (slot != slotFilter) continue;
+            }
+            list.Add(item);
+        }
+        if (list.Count == 0) return null;
+
+        string stats = AvatarStatsReader.FormatStats(AvatarStatsReader.ReadStatsOfItemParams(list));
+        if (string.IsNullOrEmpty(stats)) return null;
+
+        var names = new List<string>();
+        foreach (var item in list)
+            names.Add(FlowHelper.CleanTags(FlowHelper.Call(item, "GetNameWithLevel") as string)
+                      ?? FlowHelper.Call(item, "GetName") as string ?? "?");
+        API.LogInfo($"[SF6Access] Shop stats from {field} ({list.Count} of {count} item(s)), " +
+                    $"slot {slotFilter}: {string.Join(" + ", names)} -> {stats}");
+        return stats;
+    }
+
+    /// <summary>The equip slot a WTItemParam belongs to, -1 when the game does
+    /// not expose it (then callers must not guess).</summary>
+    private static int EquipSlotOf(ManagedObject itemParam)
+    {
+        foreach (var getter in new[] { "GetEquipSlot", "get_EquipSlot", "GetSlot", "get_Slot" })
+        {
+            int v = FlowHelper.CallInt(itemParam, getter, -1);
+            if (v >= 0) return v;
+        }
+        foreach (var fieldName in new[] { "EquipSlot", "_equipSlot", "Slot", "_slot", "mEquipSlot" })
+        {
+            int v = FlowHelper.ReadIntField(itemParam, fieldName, -1);
+            if (v >= 0) return v;
+        }
+        return -1;
     }
 
     /// <summary>
@@ -476,18 +688,35 @@ public sealed class ShopHooks : ScreenAdapter
     /// pairing picked up the player-status panel's totals instead and announced
     /// "Defense 377" on every item.
     /// </summary>
+    /// <summary>
+    /// The item-vs-equipped compare block of a buy list: it renders STRICT
+    /// triplets in tree order — e_text_value (the gear currently worn) directly
+    /// followed by e_text_current (what the FOCUSED piece grants) then
+    /// e_text_name (the localized label) → "Defense 5". Adjacency is required:
+    /// loose value/name pairing picked up the player-status panel's totals
+    /// instead and announced "Defense 377" on every item.
+    /// <para>The value that belongs to the focused row is <b>e_text_current</b>.
+    /// e_text_value is the piece the avatar is wearing, and the shop re-dresses
+    /// the avatar as the cursor moves, so it differed between two visits to the
+    /// SAME row ("the same item reads differently every time").</para>
+    /// </summary>
     private static string ReadCompareStats(string guiOwner)
     {
         try
         {
             var stats = new List<string>();
+            var seen = new HashSet<string>(System.StringComparer.OrdinalIgnoreCase);
             string prevName1 = null, prevName2 = null, prevText2 = null, prevText1 = null;
             foreach (var t in GuiTextReader.ReadTextsByOwner(guiOwner))
             {
                 if (string.IsNullOrWhiteSpace(t.Text)) continue;
                 string s = t.Text.Trim();
                 if (t.Name == "e_text_name" && prevName1 == "e_text_current" && prevName2 == "e_text_value")
-                    stats.Add($"{s} {prevText2}");
+                {
+                    // The same caption can render twice (a set's pieces each get
+                    // their own row) — one gear piece, one number per stat.
+                    if (seen.Add(s)) stats.Add($"{s} {prevText1}");
+                }
                 prevName2 = prevName1;
                 prevText2 = prevText1;
                 prevName1 = t.Name;

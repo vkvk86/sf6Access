@@ -20,17 +20,33 @@ internal sealed class LevelRoutePlanner
 
     internal readonly record struct Spot(float X, float Y, float Z);
 
-    /// <summary>A climbable connection between the standing points at its two ends.</summary>
-    internal readonly record struct Link(Spot Low, Spot High);
+    /// <summary>A connection the player makes with their hands between the standing points
+    /// at its two ends: a ladder to climb, or — <see cref="Jump"/> — a crossing they step up
+    /// onto or jump across, measured by <see cref="JumpLinkCatalog"/> and judged by
+    /// <see cref="JumpLink"/>, or — <see cref="Stair"/> — a flight of narrow stairs found by
+    /// <see cref="StairCatalog"/> and walked up. The planner treats all three alike; only the
+    /// words differ. Ladder and stair are both climbs, and a stair is the one the player
+    /// walks up with no action button at all, which is why it is worth naming apart.</summary>
+    /// <see cref="Drop"/>: a place where the ground simply falls away — measured by
+    /// <see cref="DescentScan"/> and stepped off, not climbed. Added 2026-10-07: a destination
+    /// eight metres below was reported as having no route at all while eight measured drops
+    /// stood within twelve metres of the player, because "a lower piece of ground" is not an
+    /// object and so appears in no catalogue. Naming it apart matters for the words: telling
+    /// someone to step across a nine-metre drop is worse than saying nothing.</summary>
+    internal readonly record struct Link(Spot Low, Spot High, bool Jump = false, bool Stair = false, bool Lift = false, bool Drop = false);
 
     /// <summary>Walk to <see cref="To"/>, then take ladder <see cref="Link"/> to <see cref="Exit"/>; the last leg has Link -1.
-    /// <see cref="Blocked"/>: the navmesh has no walk to this ladder's foot, though it stands close and level.</summary>
-    internal readonly record struct Leg(Spot To, Spot Exit, int Link, bool Up, bool Blocked = false);
+    /// <see cref="Blocked"/>: the navmesh has no walk to this ladder's foot, though it stands close and level.
+    /// <see cref="Jump"/>: the link is a step or a jump and not a ladder.
+    /// <see cref="Stair"/>: the link is a flight of stairs, walked up.</summary>
+    /// <see cref="Drop"/>: the leg ends by stepping off a drop and landing below.</summary>
+    internal readonly record struct Leg(Spot To, Spot Exit, int Link, bool Up, bool Blocked = false, bool Jump = false, bool Stair = false, bool Lift = false, bool Drop = false);
 
     /// <summary>"Can the player walk between these two spots?" by spot id.</summary>
     internal readonly record struct Question(int From, int To);
 
     internal const int Player = 0, Target = 1;
+
     private readonly IReadOnlyList<Link> _links;
     private readonly Spot[] _spots;
     private readonly int[] _parent;
@@ -171,57 +187,130 @@ internal sealed class LevelRoutePlanner
             }
         }
 
-        foreach (var q in Closest()) yield return q;
+        foreach (var q in Bidirectional()) yield return q;
     }
 
-    /// <summary>No route reaches the target: take ladders outward from the player, breadth first, and keep
-    /// the reached spot nearest the target's height as a partial plan. A climbable ledge, a jump or a
-    /// breakable obstacle the navmesh does not model may close the rest.</summary>
-    private IEnumerable<Question> Closest()
+    /// <summary>No pass found a route, so BOTH ends are searched at once. The player's front and
+    /// the target's front each grow through the links, one connectivity question at a time,
+    /// alternating sides. The moment one front stands in the other's connected component the two
+    /// halves are one route and the plan is complete — a search that used to stop at the nearest
+    /// partial climb now meets itself halfway. Until they meet (or the questions run out) the
+    /// partial plan keeps updating exactly as the one-sided search did: the reached spot nearest
+    /// the target's height, plus a blocked hop past an unmodelled obstacle.</summary>
+    private IEnumerable<Question> Bidirectional()
     {
-        var reached = new List<int> { Player };
-        var via = new Dictionary<int, (int from, int link, bool up)>();
-        var taken = new HashSet<(int link, bool up)>();
+        var reachedF = new List<int> { Player };
+        var viaF = new Dictionary<int, (int from, int link, bool up)>();
+        var takenF = new HashSet<(int link, bool up)>();
+        var reachedR = new List<int> { Target };
+        var viaR = new Dictionary<int, (int from, int link, bool up)>();
+        var takenR = new HashSet<(int link, bool up)>();
         int best = Player;
+        bool askF = true;
         while (true)
         {
-            // Take every ladder whose foot the answers so far connect to a reached spot.
-            for (bool grew = true; grew;)
+            // Take every link whose entry the answers so far connect to a reached spot, on both
+            // fronts at once: no question is spent, only answers already in hand. The two
+            // fronts share the union-find, so every answer either side earns, both sides keep.
+            best = GrowFront(reachedF, viaF, takenF, best);
+            GrowFront(reachedR, viaR, takenR, Player, trackBest: false);
+            // A reached spot on each front sharing a connected component IS the route.
+            if (TryMeet(reachedF, reachedR, out int meetF, out int meetR))
             {
-                grew = false;
-                for (int i = 0; i < _links.Count; i++)
-                    foreach (bool up in Directions)
-                    {
-                        int entry = EntryId(i, up), exit = ExitId(i, up);
-                        int at = taken.Contains((i, up)) ? -1 : reached.FindIndex(r => Known(r, entry) == 1);
-                        if (at < 0) continue;
-                        taken.Add((i, up));
-                        if (reached.Exists(r => Known(r, exit) == 1)) continue;
-                        reached.Add(exit);
-                        via[exit] = (reached[at], i, up);
-                        grew = true;
-                        if (Nearer(exit, best)) best = exit;
-                    }
+                SetFull(meetF, viaF, meetR, viaR);
+                yield break;
             }
-            var hop = BlockedHop(reached, taken, best);
-            if (hop is { } h) SetPartial(h.from, via, h);
-            else if (best != Player) SetPartial(best, via);
+            // No meeting yet: keep the partial plan honest while the search runs.
+            var hop = BlockedHop(reachedF, takenF, best);
+            if (hop is { } h) SetPartial(h.from, viaF, h);
+            else if (best != Player) SetPartial(best, viaF);
 
-            // Next question: a near ladder foot whose top is near the target.
-            Question? next = null;
-            float cost = float.MaxValue;
-            foreach (int r in reached)
-                for (int i = 0; i < _links.Count; i++)
-                    foreach (bool up in Directions)
-                    {
-                        int entry = EntryId(i, up);
-                        if (taken.Contains((i, up)) || Known(r, entry) >= 0) continue;
-                        float c = Distance(_spots[r], _spots[entry]) + Distance(_spots[ExitId(i, up)], _spots[Target]);
-                        if (c < cost) { cost = c; next = new Question(r, entry); }
-                    }
+            // Next question, the fronts alternating; whichever side asks, it asks about the
+            // link that best continues its own world toward the other side's anchor. A side
+            // with nothing left to ask gives way to the other; both empty ends the search.
+            var next = (askF ? CheapestOn(reachedF, takenF, Target) : CheapestOn(reachedR, takenR, Player))
+                       ?? (askF ? CheapestOn(reachedR, takenR, Player) : CheapestOn(reachedF, takenF, Target));
             if (next is not { } q) yield break;
+            askF = !askF;
             yield return q;
         }
+    }
+
+    /// <summary>Takes every link direction whose entry the answers so far connect to a reached
+    /// spot; each exit joins the front. <paramref name="best"/> tracks the reached spot nearest
+    /// the target's height and only the PLAYER'S front tracks it — the target's front is not a
+    /// place the player stands, so however high it climbs is no partial plan of theirs.</summary>
+    private int GrowFront(List<int> reached, Dictionary<int, (int from, int link, bool up)> via,
+                          HashSet<(int link, bool up)> taken, int best, bool trackBest = true)
+    {
+        for (bool grew = true; grew;)
+        {
+            grew = false;
+            for (int i = 0; i < _links.Count; i++)
+                foreach (bool up in Directions)
+                {
+                    int entry = EntryId(i, up), exit = ExitId(i, up);
+                    int at = taken.Contains((i, up)) ? -1 : reached.FindIndex(r => Known(r, entry) == 1);
+                    if (at < 0) continue;
+                    taken.Add((i, up));
+                    if (reached.Exists(r => Known(r, exit) == 1)) continue;
+                    reached.Add(exit);
+                    via[exit] = (reached[at], i, up);
+                    grew = true;
+                    if (trackBest && Nearer(exit, best)) best = exit;
+                }
+        }
+        return best;
+    }
+
+    /// <summary>A reached spot on each front that shares a connected component: the two worlds
+    /// touch. Union-find roots make the touch transitive — two DIFFERENT spots on the same
+    /// navmesh region meet just as well as the same spot reached twice.</summary>
+    private bool TryMeet(List<int> front, List<int> back, out int meetF, out int meetR)
+    {
+        var roots = new Dictionary<int, int>();
+        foreach (int b in back)
+            roots.TryAdd(Find(b), b);
+        foreach (int f in front)
+            if (roots.TryGetValue(Find(f), out int b)) { meetF = f; meetR = b; return true; }
+        meetF = meetR = -1;
+        return false;
+    }
+
+    /// <summary>Splices the two fronts into one complete plan: the player's ladders out to the
+    /// meeting, then the target's ladders replayed backwards — each taken from its other end,
+    /// because what the target's front climbed up, the player climbs down. The walk between the
+    /// two meeting spots needs no leg of its own: the beacon guides across a connected region.</summary>
+    private void SetFull(int meetF, Dictionary<int, (int from, int link, bool up)> viaF,
+                         int meetR, Dictionary<int, (int from, int link, bool up)> viaR)
+    {
+        var legs = new List<Leg>();
+        for (int at = meetF; at != Player && viaF.TryGetValue(at, out var step); at = step.from)
+            legs.Insert(0, LegOf(step.link, step.up));
+        for (int at = meetR; viaR.TryGetValue(at, out var step); at = step.from)
+            legs.Add(LegOf(step.link, !step.up));
+        legs.Add(Final());
+        Plan = legs;
+        Partial = false;
+    }
+
+    /// <summary>The cheapest unanswered question on one front: a link entry its reached spots
+    /// might connect to, ordered by the straight line it would add toward the OTHER side's
+    /// anchor — the player's front aims at the target, the target's front aims at the player.</summary>
+    private Question? CheapestOn(List<int> reached, HashSet<(int link, bool up)> taken, int anchor)
+    {
+        Question? next = null;
+        float cost = float.MaxValue;
+        foreach (int r in reached)
+            for (int i = 0; i < _links.Count; i++)
+                foreach (bool up in Directions)
+                {
+                    int entry = EntryId(i, up);
+                    if (taken.Contains((i, up)) || Known(r, entry) >= 0) continue;
+                    float c = Distance(_spots[r], _spots[entry]) + Distance(_spots[ExitId(i, up)], _spots[anchor]);
+                    if (c < cost) { cost = c; next = new Question(r, entry); }
+                }
+        return next;
     }
 
     /// <summary>Within the target's neighbourhood: a level nearer the target's height, or the same level horizontally
@@ -293,7 +382,9 @@ internal sealed class LevelRoutePlanner
         return order.ConvertAll(o => (o.link, o.up));
     }
 
-    private Leg LegOf(int link, bool up) => new(_spots[EntryId(link, up)], _spots[ExitId(link, up)], link, up);
+    private Leg LegOf(int link, bool up) =>
+        new(_spots[EntryId(link, up)], _spots[ExitId(link, up)], link, up, false,
+            _links[link].Jump, _links[link].Stair, _links[link].Lift, _links[link].Drop);
     private Leg Final() => new(_spots[Target], _spots[Target], -1, false);
     private static int EntryId(int link, bool up) => up ? LowId(link) : HighId(link);
     private static int ExitId(int link, bool up) => up ? HighId(link) : LowId(link);

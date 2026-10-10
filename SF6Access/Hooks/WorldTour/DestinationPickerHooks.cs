@@ -119,9 +119,25 @@ public class DestinationPickerHooks
                 MapSelectionMemory.Reset();
                 Speak(DestinationText.FollowMission());
                 return;
+            case DestinationAction.NowhereKnown:
+                // A history objective whose place the game no longer keeps. Saying so is the whole
+                // answer: the entry exists to tell the player what the story has been through, and
+                // silently aiming at the world origin would be a lie about where it went.
+                Speak(DestinationText.HistoryNoPlace());
+                return;
+            case DestinationAction.OtherCity:
+                // The coordinates ARE known — they are simply in the other city, where the player
+                // is not. Saying "no longer known" would be wrong and would make the player doubt
+                // a record that is perfectly good once they travel. A rest station is the one
+                // place remembered across cities on purpose, so it names itself in the answer
+                // instead of "that objective", which is a story sentence.
+                Speak(d.Category == DestinationCategory.Rest
+                    ? DestinationText.RestOtherCityChosen()
+                    : DestinationText.HistoryOtherCity());
+                return;
         }
 
-        MapSelectionMemory.Remember(d.Label, d.X, d.Y, d.Z);
+        MapSelectionMemory.Remember(d.Label, d.X, d.Y, d.Z, d.AccessKind);
         string where = me.ok ? DestinationText.Where(me.x, me.y, me.z, d.X, d.Y, d.Z) : null;
         Speak(where == null ? LocalizedText.TrackerFollowing(d.Label) : DestinationText.Chosen(d.Label, where));
     }

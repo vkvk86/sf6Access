@@ -193,6 +193,12 @@ public static class NavMeshNodes
 
     // ---------- a node's own geometry ----------
 
+    /// <summary>How many corners the polygon has, with none of them read. Split out of
+    /// <see cref="GlobalVertices"/> because "the count came back" and "a corner came back"
+    /// are two different calls and two different ways to die: a probe must be able to tell
+    /// which one killed it.</summary>
+    public static int VertexCount(ManagedObject node) => ToInt(FlowHelper.Call(node, "getGlobalVertexCount"));
+
     /// <summary>A node's corners in WORLD space. <c>getVertex</c> is deliberately not
     /// used as a fallback: it is node-local, and mixing the two spaces would compare
     /// coordinates that are not in the same frame. <paramref name="step"/> and

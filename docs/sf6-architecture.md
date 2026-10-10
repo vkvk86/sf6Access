@@ -240,6 +240,42 @@ keeps the adapter active).
   code (`RDX=0`, "Exception thrown in REMethodDefinition::invoke"), 10 times. The call was removed. It
   was first blamed for that session's crash, but the Windows event log (.NET Runtime, event 1026) showed
   the real one: the unpinned `ValueType` read below. Read that event before attributing a crash.
+- **…and the same rule covers a method that RETURNS a reference type.** A returned reference travels the
+  callee's own out slot, so it is the identical native write — it is not made safe by being the return
+  value rather than a parameter. Third case (2026-09-29, auto-walk): the driver called
+  **`AvatarBase.GetMoveVec()`** every frame to detect the player's stick. Its signature publishes no
+  parameter at all, so it reads as a harmless getter; the log says otherwise —
+  `VMContext: Caught exception code c0000005` (×3) and `Exception thrown in REMethodDefinition::invoke
+  for app.worldtour.avatar.AvatarInputController.SetChaseWalk` (×3), after which **the avatar stopped
+  accepting movement while the camera kept working**: the input VM was left broken, and the player
+  reported it in those words. The call was removed; the player's stick is now detected from the
+  displacement of the player's own world position between two frames, which calls nothing at all. When a
+  getter's declared return type is not a primitive, a struct or an enum, treat it like an `out` parameter
+  of that type — check `Method.GetReturnType()` before calling, and prefer producing the same information
+  from a read that is already proven.
+- **A controller that consumes the player's input slot must be destroyed, not dropped, when it fails.**
+  The same 2026-09-29 session: the walk order began failing, and the mod left its
+  `AvatarInputController` registered at `FieldEvent` priority while doing nothing with it. That is very
+  likely part of why the player lost movement and not only the crash above. `AvatarBase
+  .DestroyInputController(PriorityType)` exists (confirmed in the 2026-09-29 dump) — route every
+  failure path through it, and stop retrying the failed operation for the rest of the session rather
+  than re-issuing it every frame.
+- **Create such a controller LAST — on the one path that is certain to use it this frame.** The
+  2026-09-29 12:47 follow-up proved the rule above insufficient on its own: every *failure* path went
+  through `DestroyInputController`, and the player still lost their controls, because the leak was not
+  a failure path at all. `EnsureController` ran *before* the checks that could abandon the walk
+  (destination choice, arrival test, calibration window), so any return in between left a controller
+  registered with nobody driving it. The registry is keyed **only by priority**, so a controller that
+  simply *exists* keeps winning the input slot whatever it does with it — the avatar freezes while the
+  camera still works, which reads to a player exactly like a crash. Order it so that abandonment is
+  impossible by construction rather than cleaned up afterwards: compute everything that can say "stop",
+  and only then allocate.
+- **A verdict about the ENGINE and a verdict about ONE TARGET must not share a flag.** Also 2026-09-29:
+  one boolean meant both "this VM is broken, never touch it again this session" and "this reading did
+  not drive the avatar to this target". Because they were the same field, a deliberate teardown on a
+  per-target failure also poisoned the rest of the session — the next target could not even be tried.
+  Give the engine-level fault its own permanent flag, and let per-target verdicts be reset by whatever
+  starts a new attempt. (`AutoWalk.Retire` vs `AutoWalk.RetireController`; `Reset` vs `BeginWalk`.)
 - **Read a REFramework `ValueType` only while it is pinned — `Services/PinnedValue.cs`.** A struct
   returned BY VALUE (`getContactPoint(i)` → `ContactPoint`, a `via.vec3` field) is a
   `REFrameworkNET.ValueType` whose bytes live in a private managed `byte[] m_data`; `GetAddress()`
@@ -308,6 +344,48 @@ keeps the adapter active).
 - **Callback timing:** use `LateUpdateBehavior.Post` (data is fresh); `UpdateBehavior.Pre` sees stale data.
 - `_Children` order can be REVERSED vs `SelectedIndex` — never index `_Children`; use
   `Call("get_SelectedItem")` (or `UIPartsGroup.GetFocusChild()`), then read the subtree.
+- **The reflection surface is the reflection surface of `REFramework.NET.dll`, and it is NOT the .NET
+  one.** Guessing method names from .NET habit costs a build cycle each time — it has now cost three
+  in the auto-walk feature alone. **Read the assembly; do not infer.** The verified surface, read by
+  reflection off the shipped DLL (2026-09-29):
+  - **`TDB`** — `uint GetNumTypes()`, `TypeDefinition GetType(uint index)`, `GetType(string name)`,
+    `FindType(string)`, `FindTypeByFqn(uint)`, `Module GetModule(uint)`, `Types` collection, `GetString(uint)`.
+    **`GetTypeT` is the zero-argument generic `GetTypeT<T>()`** — it is NOT `GetTypeT(index)`. There is
+    no enumerator on the TDB; index a range with `GetType(uint)`.
+  - **`TypeDefinition`** — `Size` / `ValueTypeSize` are **`UInt32`**; `CreateInstance(Int32 flags)`
+    (**the flags argument is mandatory** — there is no parameterless overload); `CreateValueType()`;
+    **`CreateManagedArray(UInt32 size)`** — one argument, the ELEMENT COUNT. Also `GetElementType()`
+    (null for a non-array), `ParentType`, `GetDeclaringType()`, `GetUnderlyingType()`, `IsValueType()`,
+    `IsEnum()`, `IsByRef()`, `IsPointer()`, `IsDerivedFrom(string|TypeDefinition)`, `GetRuntimeType()`,
+    `GetMethods()` / `GetFields()` returning `List<T>`, `FindMethod`/`FindField`/`GetMethod`/`GetField`,
+    and **`Invoke(string methodName, object[] args)`** returning a `ValueType` — the way to call a
+    method whose result is needed as a struct (this is how a `via.vec3` is constructed).
+    **Absent:** `GetConstructors()`, `GetNestedTypes()`, `IsSealed()`. A constructor is the entry named
+    `.ctor` inside `GetMethods()` (overloaded — match by parameter shape, there are 7 for `via.vec3`);
+    a nested type cannot be enumerated from the outer type at all — reach it as
+    `FindType("Outer.Nested")` or through the `Type` of a field that mentions it.
+  - **`Field`** — `OffsetFromBase` is **`UInt32`** (`GetOffsetFromFieldPtr()` is the older alias;
+    there is no `GetOffset()`). Plus `Type`, `DeclaringType`, `Name`, `IsStatic()`, `IsLiteral()`,
+    `GetDataRaw(UInt64 obj, bool isValueType)`, `GetDataT<T>(...)`, `GetDataBoxed([Type], UInt64, bool)`,
+    `SetDataBoxed(UInt64, object, bool)`. Enum members are read with
+    `GetDataBoxed(typeof(byte)|typeof(int), 0, false)`, per `FieldProbeService.ReadEnum`.
+    **There is no `SetDataRaw`** — the only writers are `SetDataBoxed`, and the raw-pointer route
+    `GetData<byte>(UInt64, bool)` which returns a **writable `Byte*`**.
+    **`GetUnderlyingType()` is NOT reliable for an enum field**: it reported `System.Int64` for five
+    enums whose real boxed types are `Byte`/`Int32` (see `NaviTrial.EnumWritePlan`). Get the boxed
+    type from the engine's own cast error instead, or from the field-offset widths.
+  - **`Method`** — `GetReturnType()` (the reference-return check that the `GetMoveVec` crash hinged on),
+    `GetParameters()` returning `List<REFrameworkNET.MethodParameter>` (members: `Name`, `Type`),
+    `GetNumParams()`, `GetDeclaringType()`, `InvokeBoxed(Type, object, object[])`, `GetFunctionPtr()`.
+    **`ManagedObject` has no `GetField`/`SetDataBoxed`** — field access always goes through
+    `TypeDefinition.FindField(name)` plus the `Field` instance.
+  - **Cheapest correct way to check an unfamiliar member** — a throwaway reflection console app beats
+    string-grepping the DLL when you need signatures (parameter types, return types, overload count),
+    and beats guessing by a mile. A `net10.0` exe that does
+    `Assembly.LoadFrom(REFramework.NET.dll)` then prints
+    `t.GetMembers(BindingFlags.Public|Instance|Static|DeclaredOnly)` answers in one run what three
+    build cycles could not. For a quick existence-only check,
+    `python -c "d=open(r'...\REFramework.NET.dll','rb').read(); print(b'GetOffset' in d)"` still works.
 
 ## Stale-param re-entry pattern (MANDATORY for flow-param hooks)
 

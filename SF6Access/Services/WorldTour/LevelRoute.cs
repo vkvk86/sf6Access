@@ -18,11 +18,16 @@ internal static class LevelRoute
     /// <see cref="Partial"/>: the plan stops at the spot nearest the target's height. <see cref="Link"/>: the ladder, or -1.
     /// <see cref="Blocked"/>: no walk reaches this ladder's foot; the beacon points straight at it.</summary>
     internal readonly record struct Guidance(Phase Phase, Spot To, bool Final, bool Up, int Leg, int LaddersLeft, bool Partial, int Link,
-                                             bool Blocked = false);
+                                             bool Blocked = false, bool Jump = false, bool JumpUp = false, bool Stair = false, bool Lift = false, bool Drop = false, float DropM = 0f);
 
     internal const float LevelM = LevelRoutePlanner.LevelM;
-    private const int QuestionBudget = 48;    // About twelve seconds at FieldNavPath's query rate.
-    private const int QueryBudget = 2 * QuestionBudget; // Navmesh queries, including endpoint nudges.
+    // A scene with several ladders needs one question per ladder per direction in the outward
+    // phase alone (7 ladders = 28), before either two-ladder pass has asked anything. The old
+    // 48 ran out exactly at the budget ("48 questions (48 queries)" in the 2026-09-29 log) while
+    // the target still had near ladders unexplored, so the search reported a partial plan it
+    // never finished. 120 is about thirty seconds at FieldNavPath's 250 ms query rate — long to
+    // wait, but the alternative the player already rejected is finding the ladder themselves.
+    private const int QuestionBudget = 120;
     private const long RetryFailedMs = 30000; // Section streaming can bring other ladders into the scene.
     private const long BrokenLegMs = 3000;    // A leg must stay unreachable this long before replanning.
     private const int MaxReplans = 2;         // A plan that keeps breaking is not a plan.
@@ -37,10 +42,19 @@ internal static class LevelRoute
     private static Spot _target, _planTarget, _start, _failedFrom;
     private static LevelRoutePlanner _planner;
     private static IReadOnlyList<Leg> _plan;
-    private static int _leg, _nudge, _queries, _replans, _budget, _probedLeg = -1;
-    private static bool _offFrom, _offTo, _askDirect, _abort, _silent, _retrySweep, _partial, _closest;
+    private static int _leg, _nudge, _queries, _replans, _budget, _probedLeg = -1;    private static bool _offFrom, _offTo, _askDirect, _abort, _silent, _retrySweep, _partial, _closest;
     private static long _failedAt, _brokenSince;
+    private static long _searchStartedAt;
     private static ulong _failedLadders;
+    // The measured drops join the plan for one objective only after its first search has come up
+    // empty or short — see Links() and Finish(). Kept apart per objective so a scene where the
+    // ordinary catalogues DO reach keeps every route it already had.
+    private static bool _dropsOn;
+    private static string _dropsKey;
+    /// <summary>Whether the search that just ran already had the measured drops in it. Set by
+    /// <see cref="Links"/>; a search that had them and still came up short has nothing more to
+    /// find by looking at the ground again.</summary>
+    private static bool _linksHadDrops;
 
     /// <summary>Starts a spoken ladder search; the direct walk from the player to the target has just failed.</summary>
     internal static void Begin(string key, Spot target, Spot player, bool askDirect)
@@ -55,6 +69,14 @@ internal static class LevelRoute
 
     /// <summary>A partial plan has been climbed: the ladders go no nearer, the rest is up to the player.</summary>
     internal static bool AtClosest => _closest;
+
+    /// <summary>True while a ladder search is running. The beacon says so out loud: a thirty-second
+    /// search in silence is indistinguishable from a hung mod.</summary>
+    internal static bool Searching => _phase == Phase.Searching;
+
+    /// <summary>Milliseconds since the running search began, or 0 when none is running.</summary>
+    internal static long SearchElapsedMs =>
+        _phase == Phase.Searching && _searchStartedAt != 0 ? Environment.TickCount64 - _searchStartedAt : 0;
 
     /// <summary>The current phase and, while following a plan, the leg the player is on.</summary>
     internal static Guidance Guide(string key, Spot target, Spot player)
@@ -79,7 +101,9 @@ internal static class LevelRoute
             // confirms the player stands on the region it leads to: near the top the avatar can still snap to the
             // floor below, and an approach searched from there led back down a 131 m street route (2026-09-26).
             var ladder = _plan[_leg - 1];
-            return new Guidance(Phase.Following, current.To, false, ladder.Up, _leg - 1, 1, true, ladder.Link);
+            return new Guidance(Phase.Following, current.To, false, ladder.Up, _leg - 1, 1, true, ladder.Link,
+                                false, ladder.Jump, JumpLink.IsStepUp(ladder.To.Y, ladder.Exit.Y), ladder.Stair, ladder.Lift,
+                                ladder.Drop, ladder.To.Y - ladder.Exit.Y);
         }
         // A drifting target (a walking NPC, a contact point that follows the player) moves the last leg with it.
         var to = final ? new Spot(current.To.X + target.X - _planTarget.X, current.To.Y + target.Y - _planTarget.Y,
@@ -89,7 +113,9 @@ internal static class LevelRoute
             _probedLeg = _leg;
             ObstacleProbe.Log(_leg > 0 ? _plan[_leg - 1].Exit : player, current.To);
         }
-        return new Guidance(Phase.Following, to, final, current.Up, _leg, _plan.Count - 1 - _leg, _partial, current.Link, current.Blocked);
+        return new Guidance(Phase.Following, to, final, current.Up, _leg, _plan.Count - 1 - _leg, _partial, current.Link,
+                            current.Blocked, current.Jump, current.Jump && JumpLink.IsStepUp(current.To.Y, current.Exit.Y),
+                            current.Stair, current.Lift, current.Drop, current.To.Y - current.Exit.Y);
     }
 
     /// <summary>Feeds back the current leg's route answer; true means hold, the answer says nothing new.</summary>
@@ -133,12 +159,84 @@ internal static class LevelRoute
         if (_planner == null)
         {
             if (!LadderCatalog.Sweep()) return;
-            _planner = new LevelRoutePlanner(_start, _target, LadderCatalog.Links, _budget, _askDirect);
+            // THE STAIRS, and they come before the planner is built on purpose (2026-10-05).
+            // The owner's correction: "我要的不是我都站在楼梯前面了他才认出来，我要的是规划
+            // 路线的时候就认出来" — a stair must be one of the connections the search may
+            // route through, exactly as a ladder is, so the plan can read "walk to the stair,
+            // up it, walk on" and the homing cue can lead there. Measuring the ground around
+            // the player first is the only way a stair the player is not facing can ever be in
+            // a plan at all; JumpLinkCatalog's line toward the objective cannot see it.
+            if (StairCatalog.Sweeping) { StairCatalog.Sweep(); return; }
+            // ...and the stairs on the engine's own route, wherever they are — the ones the sweep
+            // around the player can never reach. Recalled and measured, no navmesh question.
+            if (!RouteStairFinder.Done) { RouteStairFinder.Pump(); return; }
+            // The crossings come last and cost a few frames of their own, and no navmesh
+            // question at all.
+            if (!JumpLinkCatalog.Done) { JumpLinkCatalog.Pump(); return; }
+            _planner = new LevelRoutePlanner(_start, _target, Links(), _budget, _askDirect);
         }
         // Resume the search first so the answer to the last question inside the budget still counts.
         var next = _planner.Next();
-        if (next is { } q && !_abort && _queries < QueryBudget) Ask(q);
-        else Finish();
+        if (next is { } q && !_abort) Ask(q);
+        else
+        {
+            // The budget is the planner's own: it stops asking once Asked reaches it, so a null
+            // next here means the search finished, not that it was cut off. Log the totals either
+            // way so a truncated search can never again look like "no route exists" (2026-09-29).
+            if (!_abort && _planner.Asked >= _budget)
+                API.LogInfo($"[SF6Access] Level route: question budget spent ({_planner.Asked}), {_queries} navmesh queries; what follows is what was reached");
+            Finish();
+        }
+    }
+
+    /// <summary>Every connection the planner may route through: the ladders in the scene, the
+    /// stairs measured around the player, the stairs measured on the route to the objective —
+    /// however far away those are — and the crossings measured in front of them.</summary>
+    private static List<Link> Links()
+    {
+        var all = new List<Link>(LadderCatalog.Links);
+        all.AddRange(StairCatalog.Links);
+        all.AddRange(RouteStairFinder.Links);
+        all.AddRange(JumpLinkCatalog.Links);
+        // The lifts, last and shortest of all: a platform that carries the player between its own
+        // stops. Added 2026-10-07 — see LiftCatalog.AddLinksTo for why its absence made places
+        // reachable by riding look like places with no way in at all.
+        LiftCatalog.AddLinksTo(all, WorldTourStateService.CityId);
+
+        // <b>When the catalogues came back with nothing that changes floor at all, always.</b>
+        // That is the case this was written for: 2026-10-07, Nayshall old town — the objective
+        // eight metres below, every catalogue empty, "no plan after 0 questions over 0 ladders",
+        // and the guide said to go and find an edge to jump off while eight measured drops stood
+        // within twelve metres, six of them with a confirmed walk to their lip.
+        //
+        // <b>...and when they did NOT come back empty but still did not reach, on the second
+        // search.</b> 2026-10-07, Metro City training centre, 17:13: the sweep found three flights
+        // of stairs, so CanChangeLevel() was true and the ground around the player was never
+        // measured — and the search then ran out after 23 questions with this written in its own
+        // log: link #3's LOWER end was connected to the objective while NOTHING connected the
+        // player to either of its ends. The way down to that end was a seven-metre drop standing
+        // seven metres from the player's feet. It was never in the plan, because a stair somewhere
+        // else in the scene had answered "yes" to a question about ladders.
+        //
+        // So the gate is not "is there a stair" but "did the stairs get us there". The first
+        // search is left exactly as it was; only an objective whose first search produced no full
+        // route comes back with the measured ground in hand. Nothing that already worked can
+        // change, and what was blind is blind no longer.
+        // _linksHadDrops: a scene whose every catalogue came back empty gets the drops the first
+        // time and every time, so a second search there would measure the same ground and reach
+        // the same conclusion — for nothing, and at the cost of every navmesh question again.
+        _linksHadDrops = _dropsOn || !CanChangeLevel(all);
+        if (_linksHadDrops) DescentScan.AddLinksTo(all);
+        return all;
+    }
+
+    /// <summary>Do these connections contain any way between floors? If one does, the planner has
+    /// a way down already and the measured drops stay out of it.</summary>
+    private static bool CanChangeLevel(List<Link> links)
+    {
+        foreach (var l in links)
+            if (MathF.Abs(l.High.Y - l.Low.Y) >= LevelM) return true;
+        return false;
     }
 
     internal static void Reset()
@@ -147,10 +245,14 @@ internal static class LevelRoute
         _key = null;
         _planner = null;
         _plan = null;
+        JumpLinkCatalog.Reset();
+        StairCatalog.Reset();
+        RouteStairFinder.Reset();
         _leg = _queries = _replans = 0;
         _probedLeg = -1;
         _brokenSince = 0;
         _abort = _silent = _retrySweep = _partial = _closest = false;
+        _searchStartedAt = 0;
         ResetNudge();
     }
 
@@ -158,12 +260,42 @@ internal static class LevelRoute
     {
         Reset();
         _phase = Phase.Searching;
+        _searchStartedAt = Environment.TickCount64;
         _key = key;
+        // Drops are escalated per objective: a new key starts again without them, and an
+        // objective that has already escalated keeps them on every retry and replan after it.
+        if (_dropsKey != key) { _dropsOn = false; _dropsKey = null; }
         _target = _planTarget = target;
         _start = player;
         _askDirect = askDirect;
         _budget = budget;
         _silent = silent;
+        // Alongside the ladders: the stairs around the player, measured before anything is
+        // planned. A stair has no gimmick to read, so the ground around the player is swept —
+        // see StairCatalog and the note in Pump.
+        StairCatalog.BeginSweep(player);
+        // ...and the stairs on the ROUTE TO THE OBJECTIVE, which may be any distance away. The
+        // owner's correction, 2026-10-05: "我要的是他在规划路线的时候，就把下行的梯子规划出来，跟那个
+        // 梯子距离玩家多远没有关系。假设玩家离梯子很远，但是要经过这个梯子怎么办呢？" The sweep
+        // above is a circle around the player's own feet and can never reach a stair that lies at
+        // the far end of the walk; the engine's already-computed route DOES pass through it, so the
+        // route's own bends are where the far stairs are looked for. Recalled from the beacon's
+        // cache, never queried — see RouteStairFinder.
+        RouteStairFinder.Begin(target, player);
+        // Alongside the ladders: the step and the gap in front of the player, measured on
+        // the ground. Only ever reached once a walk has failed, and only able to ADD a
+        // route where there was none.
+        //
+        // This belongs here, in the place every search starts from, and not in Begin().
+        // It used to live in Begin() only: Retry() goes through Start() -> Reset() ->
+        // JumpLinkCatalog.Reset(), which empties the found crossings and marks the scan
+        // as never having run, and Pump()'s "if (!JumpLinkCatalog.Done)" gate then reads
+        // Done == true and walks straight past it. Every thirty-second retry after the
+        // first failure therefore planned over ladders alone and never measured the
+        // player's own floor again (2026-10-04: the small scaffold was offered on the
+        // first attempt and gone from every attempt after it). Eight rays per retry,
+        // no navmesh question — less than one radar sweep.
+        JumpLinkCatalog.Begin(player, target);
     }
 
     /// <summary>After a failure: quietly re-check the direct walk, and the ladders too if they or the player changed.</summary>
@@ -175,9 +307,40 @@ internal static class LevelRoute
         var me = AvatarFieldReader.ReadPlayerPos(WorldTourStateService.GetAvatarManager());
         if (!me.ok) return;
         var player = new Spot(me.x, me.y, me.z);
-        bool changed = LadderCatalog.Signature != _failedLadders || Flat(player, _failedFrom) > ReachM;
+        // A drop or a climb between the failure and this retry is a different world even when the
+        // flat distance is small: from the roof of the SiRN building site the owner dropped to the
+        // ground below (2026-10-02 22:37), the flat check still read "unchanged", so the retry
+        // spent its single question on the direct walk, the engine snapped both ends onto the same
+        // boundary node and answered "yes" — and the resulting one-question plan displaced the
+        // honest end-of-walk state (the hint, the relay) for the rest of the night while the
+        // player pushed a wall two metres from the objective.
+        bool changed = LadderCatalog.Signature != _failedLadders || Flat(player, _failedFrom) > ReachM
+                       || MathF.Abs(player.Y - _failedFrom.Y) >= LevelM;
+        // ...and the floor the answers came from. Every ladder question was asked from _start:
+        // standing five metres higher than that — because the player climbed the ladder the
+        // plan offered, or one they found themselves — makes all of those answers stale, and
+        // the check above cannot see it, because it compares against the spot where the search
+        // gave up, which IS the new floor (2026-10-03 18:45: the plan was climbed to 22.7 m,
+        // the objective was 6 m above and the one ladder that reached it had been judged
+        // unreachable from 17.1 m; the retry then spent its single question on the direct
+        // walk every thirty seconds and never asked a ladder again). One full search per
+        // floor: _start moves with the retry, so standing still afterwards goes back to one.
+        //
+        // The gate is a STEP, not a floor (2026-10-05). It used to be LevelM (2 m) — a whole
+        // avatar height — and that is exactly the height a flight of metal stairs does NOT
+        // cross: the 2026-10-05 log has the player climbing a stair 0.89 m over the whole
+        // scan, so `climbed` read false, the retry spent its ONE question on the direct walk,
+        // answered no, and never looked at a ladder or a stair again — every thirty seconds
+        // for the whole session (`question budget spent (1)`). A real ladder climbs 6.3 m
+        // and passed the old gate, which is why "the nav is blind to stairs" and not "blind
+        // to ladders". A stair's progress is a step, so a step is what the gate measures;
+        // standing still still reads false and still costs one question.
+        bool climbed = MathF.Abs(player.Y - _start.Y) >= JumpLink.StepM || Flat(player, _start) > ReachM;
+        if (climbed && !changed)
+            API.LogInfo($"[SF6Access] Level route: the player stands on another floor than the " +
+                        $"search was run from ({Show(_start)} -> {Show(player)}); asking the ladders again in full");
         bool closest = _closest;
-        Start(_key, _target, player, askDirect: true, changed ? QuestionBudget : 1, silent: true);
+        Start(_key, _target, player, askDirect: true, changed || climbed ? QuestionBudget : 1, silent: true);
         _closest = closest;
     }
 
@@ -221,6 +384,40 @@ internal static class LevelRoute
     private static void Finish()
     {
         _plan = _planner.Plan;
+
+        // <b>2026-10-07 — a search that did not arrive is the reason to look at the ground.</b>
+        // A plan that stops short (or no plan at all) is the planner saying "of the connections
+        // I was given, none reach". Until now that was the end of it: the guide announced the
+        // short leg as a way down and the player walked into a wall. It is not the end of it —
+        // the connections it was given were the objects in the catalogues, and a place where the
+        // ground simply falls away is not an object. So the search is run once more, from where
+        // the player stands now, with those measured drops in hand.
+        //
+        // Once per objective, so a scene with no way down is not searched for ever; and never
+        // after _abort, where the objective itself has no navmesh node and no amount of looking
+        // at the ground will conjure one. The player hears "still searching" meanwhile, which is
+        // the truth, and the second attempt either arrives or hands back exactly what the first
+        // one found — so this can only ever improve on it.
+        if (!_dropsOn && !_linksHadDrops && !_abort && (_plan == null || _planner.Partial))
+        {
+            int had = _planner.LinkCount;
+            int asked = _planner.Asked;
+            _dropsOn = true;
+            _dropsKey = _key;
+            var here = AvatarFieldReader.ReadPlayerPos(WorldTourStateService.GetAvatarManager());
+            var from = here.ok ? new Spot(here.x, here.y, here.z) : _start;
+            bool silent = _silent;
+            // "The ladders go no nearer" is a verdict about the world, not about this search:
+            // a stand reached by climbing is still reached when the search is run again.
+            bool closest = _closest;
+            API.LogInfo($"[SF6Access] Level route: {(_plan == null ? "no plan" : "only a partial plan")} after {asked} questions " +
+                        $"over {had} links; asking again with the drops measured around the player");
+            Start(_key, _target, from, askDirect: true, QuestionBudget, silent);
+            _closest = closest;
+            LadderCatalog.BeginSweep();
+            return;
+        }
+
         if (_plan != null)
         {
             bool silent = _silent;

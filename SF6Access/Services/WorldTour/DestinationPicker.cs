@@ -28,8 +28,12 @@ public sealed class DestinationPicker
         var byCategory = new SortedDictionary<DestinationCategory, List<Destination>>();
         foreach (var e in entries)
         {
-            // A place whose position failed to read (exact origin) cannot be guided to.
-            if (string.IsNullOrWhiteSpace(e.Name) || e.Action == DestinationAction.Go && !e.HasPosition) continue;
+            // A place whose position failed to read (exact origin) cannot be guided to — with the
+            // one exception of an entry that never claimed a position at all (a history objective
+            // the game no longer has a live object for, or the "save this spot" action): those are
+            // listed and spoken, and choosing them explains itself. See DestinationAction.
+            if (string.IsNullOrWhiteSpace(e.Name)) continue;
+            if (e.Action == DestinationAction.Go && !e.HasPosition) continue;
             if (!byCategory.TryGetValue(e.Category, out var list))
                 byCategory[e.Category] = list = new List<Destination>();
             if (!IsRepeat(list, e, mergeM)) list.Add(e);
@@ -38,7 +42,12 @@ public sealed class DestinationPicker
         var groups = new List<Group>();
         foreach (var (category, list) in byCategory)
         {
-            list.Sort((a, b) => SortKey(a, px, pz).CompareTo(SortKey(b, px, pz)));
+            // THE STORY'S OWN ORDER SURVIVES. Every other category is sorted nearest-first,
+            // because for a list of shops that is the useful order. The mission history is the
+            // one list whose sequence carries information — entry N was the objective before
+            // entry N+1 — and re-sorting it by distance would shuffle the story into noise.
+            if (category != DestinationCategory.MissionHistory)
+                list.Sort((a, b) => SortKey(a, px, pz).CompareTo(SortKey(b, px, pz)));
             groups.Add(new Group(category, list));
         }
         return groups;

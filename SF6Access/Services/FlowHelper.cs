@@ -567,6 +567,16 @@ public static partial class FlowHelper
         try { return Convert.ToInt32(result); } catch { return fallback; }
     }
 
+    /// <summary>Call a method and take the result as a float. <paramref name="fallback"/>
+    /// on a miss or a non-numeric result — never an exception.</summary>
+    public static float CallFloat(ManagedObject obj, string methodName, float fallback, params object[] args)
+    {
+        var result = Call(obj, methodName, args);
+        if (result == null) return fallback;
+        try { return Convert.ToSingle(result); }
+        catch { return fallback; }
+    }
+
     private static bool IsArray(ManagedObject obj)
     {
         try { return obj?.GetTypeDefinition()?.FullName?.EndsWith("[]") == true; }
@@ -584,8 +594,115 @@ public static partial class FlowHelper
     public static ManagedObject GetListItem(ManagedObject list, int index)
     {
         if (list == null) return null;
-        return Call(list, IsArray(list) ? "Get" : "get_Item", index) as ManagedObject;
+        if (!IsArray(list))
+        {
+            var viaList = Call(list, "get_Item", index) as ManagedObject;
+            if (viaList != null) return viaList;
+            return GetListItemNative(list, index, listContainer: true);
+        }
+
+        // A T[] field is System.Array, and its element accessor does NOT take a
+        // boxed int: every shop WTItemParam[] read through "Get" with an int
+        // returned null (the count came back fine, the elements never did),
+        // which silently pushed the gear readout onto its GUI fallback. Four
+        // routes, most-documented first; which one lands is logged once.
+        try
+        {
+            var proxy = list.As<_System.Array>();
+            if (proxy != null)
+            {
+                var elem = proxy.GetValue(index);
+                if (elem is ManagedObject mo)
+                {
+                    LogArrayRoute("proxy GetValue");
+                    return mo;
+                }
+            }
+        }
+        catch { }
+
+        var viaUint = Call(list, "Get", (uint)index);
+        if (viaUint != null)
+        {
+            LogArrayRoute("Get(uint)");
+            return viaUint as ManagedObject;
+        }
+        var viaInt = Call(list, "Get", index) as ManagedObject;
+        if (viaInt != null) return viaInt;
+        return GetListItemNative(list, index, listContainer: false);
     }
+
+    /// <summary>
+    /// One element read straight out of the engine's native storage — the last
+    /// route, tried only when every managed accessor came back empty. The shop's
+    /// gear arrays reported a count and no elements through any managed call,
+    /// and "the list is empty" is indistinguishable from "the read is broken"
+    /// from outside, so the readout silently fell back to the GUI.
+    ///
+    /// <para><b>The layout is NaviTrial's</b> (settled there for via.Array by
+    /// writing elements and reading the bytes back): an array's elements live
+    /// BEHIND the pointer at <c>+0x10</c> of the array object, 8 bytes per slot
+    /// for a reference element. A <c>List&lt;T&gt;</c> holds that very array as
+    /// its first field — also at <c>+0x10</c> — so it costs one extra
+    /// dereference. Value-type elements are stored inline and are NOT
+    /// ManagedObjects: this returns null for them rather than hand back a
+    /// pointer-shaped piece of a struct.</para>
+    /// </summary>
+    public static ManagedObject GetListItemNative(ManagedObject list, int index, bool listContainer)
+    {
+        try
+        {
+            ulong address = AddressOf(list);
+            if (address == 0) return null;
+
+            ulong storage = ReadQword(address + ARRAY_DATA_POINTER_OFFSET);
+            if (storage == 0) return null;
+            if (listContainer)
+            {
+                storage = ReadQword(storage + ARRAY_DATA_POINTER_OFFSET);
+                if (storage == 0) return null;
+            }
+
+            var element = list.GetTypeDefinition()?.ElementType;
+            if (element != null && element.IsValueType()) return null;
+
+            ulong pointer = ReadQword(storage + (ulong)index * 8);
+            if (pointer < MIN_OBJECT_ADDRESS || (pointer & 7) != 0) return null;
+            if (!ManagedObject.IsManagedObject(pointer)) return null;
+            var found = ManagedObject.FromAddress(pointer);
+            if (found == null) return null;
+            LogArrayRoute("native element pointer");
+            return found;
+        }
+        catch { }
+        return null;
+    }
+
+    /// <summary>Offset of the element-storage pointer inside an engine array
+    /// object (NaviTrial's DATA_POINTER_OFFSET, settled there).</summary>
+    private const ulong ARRAY_DATA_POINTER_OFFSET = 0x10;
+
+    /// <summary>Below this, a word is not an object pointer.</summary>
+    private const ulong MIN_OBJECT_ADDRESS = 0x10000;
+
+    /// <summary>One 8-byte word of the game's memory, 0 when unreadable.</summary>
+    public static ulong ReadQword(ulong address)
+    {
+        if (address == 0) return 0;
+        try { return (ulong)Marshal.ReadInt64((IntPtr)(long)address); }
+        catch { return 0; }
+    }
+
+    /// <summary>Which array-element route actually worked — logged once, because
+    /// "the array had 7 elements and none of them could be read" is invisible
+    /// from the outside.</summary>
+    private static void LogArrayRoute(string route)
+    {
+        if (_arrayRouteLogged) return;
+        _arrayRouteLogged = true;
+        API.LogInfo($"[SF6Access] Array element read via {route}");
+    }
+    private static bool _arrayRouteLogged;
 
     /// <summary>One float component ("x"/"y"/"z") of a via vector value: getter
     /// first, then the component as a direct FIELD of the boxed
@@ -767,6 +884,22 @@ public static partial class FlowHelper
         return null;
     }
 
+    /// <summary>Raw (tags intact) text of a via.gui.Text-style component.
+    /// Unlike <see cref="ReadGuiText"/> the inline tags survive
+    /// (<c>&lt;INPT&gt;</c>/<c>&lt;ICON&gt;</c>/<c>&lt;PAD ref&gt;</c>…), so a
+    /// <see cref="SpeakableIcons"/> pass can voice the buttons instead of the
+    /// tags being silently stripped into empty gaps ("按打开暂停菜单").</summary>
+    public static string ReadGuiTextRaw(ManagedObject textObj)
+    {
+        if (textObj == null) return null;
+        foreach (var m in new[] { "get_Message", "get_Text", "get_String" })
+        {
+            var text = Call(textObj, m) as string;
+            if (!string.IsNullOrEmpty(text)) return text;
+        }
+        return null;
+    }
+
     /// <summary>Resolve a localized message Guid with a timeout (via.gui.message.get
     /// crashes for some Guids). <paramref name="cleanTags"/> false keeps the raw tags
     /// (e.g. input-icon <c>&lt;ICON&gt;</c>/<c>&lt;INPT&gt;</c>) so a later
@@ -899,7 +1032,7 @@ public static partial class FlowHelper
     }
 
     /// <summary>Resolve a Guid stored in a field of the given object.</summary>
-    public static string ResolveGuidField(ManagedObject obj, string fieldName)
+    public static string ResolveGuidField(ManagedObject obj, string fieldName, bool cleanTags = true)
     {
         if (obj == null) return null;
         try
@@ -910,7 +1043,7 @@ public static partial class FlowHelper
 
             var raw = field.GetDataBoxed(typeof(Guid), obj.GetAddress(), false);
             if (raw is REFrameworkNET.ValueType vt)
-                return ResolveGuid(vt);
+                return ResolveGuid(vt, cleanTags);
         }
         catch { }
         return null;

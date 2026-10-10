@@ -185,7 +185,14 @@ public class GuideTextHooks
         {
             if (gui.NameFilter != null && t.Name != gui.NameFilter) continue;
             if (string.IsNullOrWhiteSpace(t.Text)) continue;
-            parts.Add(t.Text.Replace('\n', ' ').Trim());
+            // Guide texts name their buttons with inline icon tags (<ICON PadR3>,
+            // <INPT id="KeyV">...). Text has those tags STRIPPED by GuiTextReader,
+            // which turns "Press <icon> or <icon> to open" into "Press  or  to
+            // open" — the key names vanish. Voice the tags from Raw first, exactly
+            // as TutorialHooks and DialogFlowHooks already do, so the announcement
+            // names the buttons; unmapped tokens are logged by SpeakToken.
+            string raw = t.Raw ?? t.Text;
+            parts.Add(FlowHelper.CleanTags(FlowHelper.SpeakableIcons(raw)).Replace('\n', ' ').Trim());
             if (parts.Count >= 4) break;
         }
         return parts.Count > 0 ? string.Join(". ", parts) : null;

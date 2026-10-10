@@ -111,6 +111,20 @@ public static partial class FieldNavPath
     /// real radius cannot take.</summary>
     private static float _agentRadius = -1f;
 
+    // ---- the twenty-sixth finding's route cache ----
+    // The WHOLE corner list of the last successful aim query, kept so that a walk armed
+    // milliseconds later (NaviTrial) can fill a multi-point RoutePos WITHOUT issuing a
+    // competing query. A fresh query at walk time is what the old route probe attempted,
+    // and it lost the rate-limit race to the beacon's own Resolve on every single key
+    // press — the answer must be reused, not re-asked. A one-point RoutePos is the wall:
+    // the engine is handed a destination and no route, so it walks AT the point and
+    // presses into whatever stands between (the 20:15 trial: cos=0.757 TOWARD with the
+    // store finally correct, and the avatar wedged 3.16 m short; the next walk, from the
+    // wedged position, moved 0.00 m).
+    private static RouteShape _lastRoute;
+    private static (float x, float y, float z) _lastRouteDest;
+    private static long _lastRouteAt;
+
     /// <summary>Switch on, the avatar's surface resolved, and the engine itself says this
     /// place has a navmesh. It touches engine objects, so it is <c>false</c> immediately
     /// when the switch is off; call it when arming a beacon, not every frame.</summary>
@@ -133,6 +147,98 @@ public static partial class FieldNavPath
     /// is it? Shares the rate limit with <see cref="TryReach"/>; no aim is read.</summary>
     public static PathAnswer TryConnect(float ax, float ay, float az, float bx, float by, float bz)
         => PATHFINDER_ENABLED ? Query(ax, ay, az, bx, by, bz, readAim: false) : default;
+
+    /// <summary><b>The whole route from the avatar to a world point — every bend the engine's
+    /// own pathfinder produced, in order.</b> This is the input a hand-built
+    /// <c>NaviRequestData.RoutePos</c> array needs: a straight-line request is why an auto-walk
+    /// presses into a wall instead of going round it.
+    ///
+    /// <para><b>Costs a query.</b> Shares the same rate limiter and the same single blocking
+    /// <c>queryPathSync</c> as <see cref="TryReach"/>, so it must be called when a walk is being
+    /// ARMED and never per frame. <see cref="RouteShape.Ok"/> is false when the query was
+    /// rate-limited or could not run; a caller must not read that as "straight".</para>
+    ///
+    /// <para><b>Read-only with respect to the avatar.</b> Nothing here writes to the player, the
+    /// camera, or the input slot. It exists so the corner list can be inspected in a log before
+    /// anything is asked to walk along it.</para></summary>
+    public static RouteShape ReadRouteTo(float x, float y, float z)
+    {
+        if (!PATHFINDER_ENABLED) return default;
+        var me = AvatarFieldReader.ReadPlayerPos(null);
+        if (!me.ok) { Fail("the avatar's own position is unreadable"); return default; }
+
+        long now = Environment.TickCount64;
+        if (now < _nextQueryAt) return default;
+        _nextQueryAt = now + MinQueryIntervalMs;
+        try
+        {
+            var surface = ReadySurface();
+            if (surface == null) return default;
+            if (!Write(_start, me.x, me.y, me.z) || !Write(_end, x, y, z)) return default;
+
+            var report = FieldProbeService.NewInstance(_reportType);
+            if (report == null) return default;
+            _queryPathSync.InvokeBoxed(typeof(bool), surface,
+                                       new object[] { _start.View, _end.View, report });
+
+            bool exists = FieldProbeService.Member(report, "Exist", typeof(bool)) is bool e && e;
+            if (!exists)
+            {
+                // The engine refused a route. WHY it refused decides what the caller may do:
+                // "on the mesh and genuinely unreachable" is an answer to respect (stop asking),
+                // while "no answer at all" must never be read as either walkable or blocked.
+                var why = Diagnose(report, log: true);
+                return new RouteShape(false, 0, new (float, float, float)[0],
+                                      (me.x, me.y, me.z), (x, y, z), Classify(why));
+            }
+
+            var info = FieldProbeService.Member(report, "PathInfo") as ManagedObject;
+            if (info == null) return default;
+
+            // String pulling turns the portal corridor into the line the engine would walk.
+            // Without it the points are raw portals, which is worse but not wrong; the shape
+            // says how many it got, so the log can be read honestly either way.
+            TraceLine(info);
+            var shape = ReadRoute(info, me.x, me.y, me.z);
+            return new RouteShape(shape.Ok, shape.Points, shape.Corners, shape.Start, shape.End,
+                                  Reachability.Reachable);
+        }
+        catch (Exception ex)
+        {
+            Fail($"ReadRouteTo: {ex.GetType().Name}: {ex.Message}");
+            return default;
+        }
+    }
+
+    /// <summary><b>The whole bend list of the aim query the beacon JUST ran for this same
+    /// destination — recalled, never re-queried.</b> This is how an auto-walk gets its
+    /// multi-point <c>RoutePos</c> without losing the rate-limit race: the beacon's
+    /// <c>Resolve</c> ran the query milliseconds ago, and this returns exactly what that
+    /// query produced.</summary>
+    ///
+    /// <para><b>Freshness is the same window <c>BeaconDestination.RouteTo</c> trusts</b>
+    /// (twice <see cref="MinQueryIntervalMs"/>): a walk is armed within milliseconds of the
+    /// resolve, so the recalled shape is at most one limiter window old — the same
+    /// staleness the beacon's own aim already carries. A destination more than half a
+    /// metre from the cached query's goal is a DIFFERENT goal and does not match.</para>
+    ///
+    /// <para><b>False means fall back, never guess.</b> No cache, a stale cache, or a cache
+    /// for another goal all return false; the caller then walks the single point it has,
+    /// which is what it has always done.</para></summary>
+    public static bool TryRecallRoute(float x, float y, float z,
+                                      out (float X, float Y, float Z)[] corners)
+    {
+        corners = null;
+        if (!PATHFINDER_ENABLED) return false;
+        if (!_lastRoute.Ok || _lastRoute.Corners == null || _lastRoute.Corners.Length == 0)
+            return false;
+        long age = Environment.TickCount64 - _lastRouteAt;
+        if (age < 0 || age > MinQueryIntervalMs * 2) return false;
+        float dx = _lastRouteDest.x - x, dy = _lastRouteDest.y - y, dz = _lastRouteDest.z - z;
+        if (dx * dx + dy * dy + dz * dz > 0.25f) return false; // >0.5 m off: another goal
+        corners = _lastRoute.Corners;
+        return true;
+    }
 
     private static PathAnswer Query(float sx, float sy, float sz, float x, float y, float z, bool readAim)
     {
@@ -202,6 +308,19 @@ public static partial class FieldNavPath
                 if (readAim)
                     hasCorner = AimPoint(info, points, sx, sy, sz, AgentRadius(surface),
                                          out cx, out cy, out cz, out turn);
+
+                // THE TWENTY-SIXTH FINDING — stash the WHOLE bend list of this query, so a
+                // walk armed milliseconds later fills a multi-point RoutePos from it instead
+                // of racing the limiter for a second query. The trace line is already pulled
+                // (above), so the corners ReadRoute returns here are the string-pulled line
+                // the engine itself would walk — the exact input a hand-built RoutePos needs.
+                // Costs only managed reads of the PathInfo already in hand; no engine call.
+                if (readAim)
+                {
+                    var shape = ReadRoute(info, sx, sy, sz);
+                    if (shape.Ok && shape.Corners.Length > 0)
+                    { _lastRoute = shape; _lastRouteDest = (x, y, z); _lastRouteAt = now; }
+                }
             }
 
             Step(7, string.Format(CultureInfo.InvariantCulture,
@@ -247,6 +366,8 @@ public static partial class FieldNavPath
         _tracing = true;
         _nextQueryAt = 0;
         _agentRadius = -1f;
+        _lastRoute = default;
+        _lastRouteAt = 0;
         RouteDescription = "not probed yet";
     }
 

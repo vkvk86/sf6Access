@@ -473,7 +473,7 @@ public static class ObjectDumper
 
     // ==================== HELPERS ====================
 
-    private static void DumpFieldsWithValues(StringBuilder sb, TypeDefinition td, ManagedObject obj, string indent)
+    public static void DumpFieldsWithValues(StringBuilder sb, TypeDefinition td, ManagedObject obj, string indent)
     {
         if (td == null) return;
 
@@ -508,7 +508,7 @@ public static class ObjectDumper
         catch { }
     }
 
-    private static void DumpMethodSignatures(StringBuilder sb, TypeDefinition td, string indent)
+    public static void DumpMethodSignatures(StringBuilder sb, TypeDefinition td, string indent)
     {
         if (td == null) return;
 
@@ -544,5 +544,78 @@ public static class ObjectDumper
             }
         }
         catch { }
+    }
+
+    /// <summary>What the type's getters actually RETURN, not merely that they exist.
+    /// Read-only by construction: only <c>Get*</c>/<c>get_*</c> members taking no argument
+    /// (or one integer, passed <paramref name="sample"/>) are ever invoked.</summary>
+    public static void DumpGetters(StringBuilder sb, TypeDefinition td, ManagedObject obj,
+                                   string indent, string[] nameFilters = null, int maxTries = 80, uint sample = 0)
+    {
+        if (td == null || obj == null) return;
+        var methods = td.GetMethods();
+        if (methods == null) return;
+
+        int tried = 0;
+        foreach (var m in methods)
+        {
+            if (tried++ > maxTries) break;
+            string name = m.Name ?? "";
+            if (!name.StartsWith("Get") && !name.StartsWith("get_")) continue;
+            if (nameFilters != null && !Matches(name, nameFilters)) continue;
+
+            var ps = m.GetParameters();
+            object[] args;
+            if (ps == null || ps.Count == 0) args = Array.Empty<object>();
+            else if (ps.Count == 1)
+            {
+                string pt = ps[0].Type?.FullName ?? "";
+                if (pt.Contains("UInt32")) args = new object[] { sample };
+                else if (pt.Contains("Int32")) args = new object[] { (int)sample };
+                else continue;
+            }
+            else continue;
+
+            object result;
+            try { result = m.InvokeBoxed(typeof(object), obj, args); }
+            catch { continue; }
+            DescribeGetter(sb, indent, name, result);
+        }
+    }
+
+    private static bool Matches(string name, string[] filters)
+    {
+        foreach (string f in filters)
+            if (name.IndexOf(f, StringComparison.OrdinalIgnoreCase) >= 0) return true;
+        return false;
+    }
+
+    /// <summary>A returned value, or — when it is a list or an object — the thing inside it,
+    /// since a nested record is usually where the answer actually is.</summary>
+    private static void DescribeGetter(StringBuilder sb, string indent, string name, object result)
+    {
+        if (result == null) { sb.AppendLine($"{indent}{name}() -> null"); return; }
+
+        int count = FlowHelper.GetListCount(result as ManagedObject);
+        if (count > 0)
+        {
+            sb.AppendLine($"{indent}{name}() -> list of {count}");
+            var item = FlowHelper.GetListItem(result as ManagedObject, 0);
+            if (item == null) return;
+            var itd = item.GetTypeDefinition();
+            sb.AppendLine($"{indent}  item {itd?.FullName ?? "?"}");
+            DumpFieldsWithValues(sb, itd, item, indent + "  ");
+            return;
+        }
+
+        if (result is ManagedObject mo)
+        {
+            sb.AppendLine($"{indent}{name}() -> {(mo.GetTypeDefinition()?.FullName ?? "?")}");
+            DumpFieldsWithValues(sb, mo.GetTypeDefinition(), mo, indent + "  ");
+            return;
+        }
+
+        string text = result.ToString() ?? "?";
+        sb.AppendLine($"{indent}{name}() -> {(text.Length > 120 ? text.Substring(0, 120) + "..." : text)}");
     }
 }

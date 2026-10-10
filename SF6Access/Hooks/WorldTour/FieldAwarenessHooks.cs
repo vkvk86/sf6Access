@@ -53,6 +53,11 @@ public class FieldAwarenessHooks
     // counted out loud rather than silently dropped.
     private const int MAX_NEARBY_SPOKEN = 8;
 
+    // How far out the on-demand readout names the SCENE, and how close in it stays quiet
+    // because the game's own access list already covers that (arm's reach).
+    private const float SCENE_NEAR_M = 25f;
+    private const float ARM_REACH_M = 2.5f;
+
     // Floor between automatic arrival announcements, independent of what the
     // section id does.
     private const long ARRIVAL_MIN_GAP_MS = 20000;
@@ -133,7 +138,15 @@ public class FieldAwarenessHooks
         // arrival on every flap.
         uint section = WorldTourStateService.CurrentSectionId;
         if (section != 0 && GameStateTracker.HasChanged(SECTION_KEY, section.ToString()))
+        {
             _arrivalPending = true;
+
+            // Where this district is, learned by standing in it: the game has no
+            // position for a district anywhere it can be read, so the player's own
+            // feet are the only honest source. (DistrictMemory, 2026-10-02.)
+            var pp = AvatarFieldReader.ReadPlayerPos(mgr);
+            if (pp.ok) DistrictMemory.Sample(WorldTourStateService.CityId, section, pp.x, pp.y, pp.z);
+        }
 
         if (wantsNearby)
         {
@@ -247,7 +260,17 @@ public class FieldAwarenessHooks
     private static void AnnounceNearby(bool manual)
     {
         var list = ReadInteractables();
-        if (list.Count == 0)
+        list.Sort((a, b) => a.Distance.CompareTo(b.Distance));
+
+        var parts = new List<string>(list.Count);
+        foreach (var it in list)
+        {
+            string d = Describe(it);
+            if (!string.IsNullOrEmpty(d)) parts.Add(d);
+        }
+        AddNamedSurroundings(parts);
+
+        if (parts.Count == 0)
         {
             if (AnnounceNearbyFromAvatarList()) return;
             // "Nothing nearby" is an ANSWER, so it is only ever spoken to someone
@@ -258,18 +281,37 @@ public class FieldAwarenessHooks
             return;
         }
 
-        list.Sort((a, b) => a.Distance.CompareTo(b.Distance));
-
-        var parts = new List<string>(list.Count);
-        foreach (var it in list)
-        {
-            string d = Describe(it);
-            if (!string.IsNullOrEmpty(d)) parts.Add(d);
-        }
-        if (parts.Count == 0) return;
-
         string header = LocalizedText.NearbyCount(parts.Count);
         ScreenReaderService.Speak($"{header}: {Join(parts)}", interrupt: true);
+    }
+
+    /// <summary>What the field AROUND the player is called, past arm's reach: every real name
+    /// the scene sweep has found, each with a clock bearing and a distance.
+    ///
+    /// <para>The picker answers "where can I go"; this answers "what is around me" — which is
+    /// the whole of the 2026-10-03 request "多了很多交互物，但我都不知道是什么呀". Only names
+    /// the game itself publishes are spoken: an editor's object name ("gm 025000") read aloud
+    /// tells a blind player nothing, which is exactly why they were filtered out of the
+    /// picker on the same day.</para>
+    /// </summary>
+    private static void AddNamedSurroundings(List<string> parts)
+    {
+        var me = AvatarFieldReader.ReadPlayerPos(WorldTourStateService.GetAvatarManager());
+        if (!me.ok) return;
+
+        var named = new List<SceneTargetCatalog.Named>();
+        SceneTargetCatalog.CollectNear(named, me.x, me.z, SCENE_NEAR_M, ARM_REACH_M);
+        if (named.Count == 0) return;
+
+        var camFwd = FieldDirectionService.GetCameraForward();
+        foreach (var n in named)
+        {
+            float dx = n.X - me.x, dz = n.Z - me.z;
+            int meters = (int)System.Math.Round(System.MathF.Sqrt(dx * dx + dz * dz));
+            int hour = FieldDirectionService.ClockHour(camFwd, dx, dz);
+            parts.Add(hour > 0 ? LocalizedText.AtClockMeters(n.Name, hour, meters)
+                               : LocalizedText.AtMeters(n.Name, meters));
+        }
     }
 
     /// <summary>Read every entry of <c>AvatarManager.CurrentAccessInfoList</c>

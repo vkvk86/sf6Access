@@ -135,6 +135,127 @@ public static class FieldRayCaster
     public static bool TryCastBodyStack(FieldDirectionService.FlatDir[] dirs, float maxDistance, RayHit[] hits)
         => CastColumn(dirs, maxDistance, BODY_HEIGHTS, hits, everyRay: true);
 
+    /// <summary><b>Where the ground is under one point of the world, in metres Y — or
+    /// NaN when there is no ground under it at all.</b> The floor probe: the one
+    /// measurement that turns "the navmesh refuses" into a number a jump can be judged
+    /// against (<see cref="JumpLink"/>).
+    ///
+    /// <para><b>True means the cast RAN, not that it found a floor.</b> A floorY of NaN
+    /// is a hole — the edge of a gap, or the far side of a drop — and it is exactly what
+    /// the caller is looking for. False is "the sensor could not run", which no caller
+    /// may read as "there is nothing under there".</para>
+    ///
+    /// <para><b>Same cast, same container, same filter as the radar</b> — the avatar's own
+    /// <c>CharacterController.FilterInfo</c>, which is the filter that knows the ground
+    /// an avatar stands on. The geometry is ours: straight down from
+    /// <paramref name="aboveY"/>, the only direction whose answer is a floor height.
+    /// Nothing is allocated, nothing is created; the lifetime rules this class was
+    /// written around are kept exactly as they are.</para>
+    ///
+    /// <para>This is the first cast in this mod that does not start at the avatar, and
+    /// that is the whole reason it exists: you cannot measure a gap you are standing in
+    /// front of by casting from inside yourself.</para></summary>
+    public static bool TryFloorBelow(float x, float aboveY, float z, float drop, out float floorY)
+    {
+        floorY = float.NaN;
+        if (!(drop > 0f)) return false;
+        try
+        {
+            if (!EnsureRoute()) return false;
+            var result = FieldProbeService.SharedInstance(_resultType);
+            if (result == null) return false;
+
+            var avatar = PlayerAvatar();
+            var filter = FieldProbeService.Member(CharaController(avatar), "FilterInfo") as ManagedObject;
+            if (filter == null) return false;
+            if (!Write(_start, x, aboveY, z) || !Write(_end, x, aboveY - drop, z)) return false;
+
+            result.Call("clear");
+            _castRayAll.InvokeBoxed(null, null,
+                new object[] { _start.View, _end.View, result, filter, DISABLE_BACK_FACING });
+
+            if (!FieldRayContacts.Nearest(result, out float d)) return true;   // ran: nothing under it
+            floorY = aboveY - d;
+            return true;
+        }
+        catch (Exception ex)
+        {
+            if (!_failLogged)
+            {
+                _failLogged = true;
+                API.LogWarning($"[SF6Access] FieldRayCaster floor probe failed: {ex.GetType().Name}: {ex.Message}");
+            }
+            return false;
+        }
+    }
+
+    /// <summary><b>How far a body can walk from ANY point of the world, in one direction.</b>
+    /// The horizontal twin of <see cref="TryFloorBelow"/>: both exist because every other cast in
+    /// this mod leaves the AVATAR, and a route round a corner cannot be measured from inside the
+    /// person standing at the corner's near side. You cannot ask "what is past that wall" with a
+    /// ray that starts behind the player's own navel.
+    ///
+    /// <para><b>True means the cast RAN, not that the way is open.</b> <c>hit.Hit == false</c> means
+    /// nothing stopped the ray inside <paramref name="maxDistance"/>, which is what an open hop looks
+    /// like. False is "the sensor could not run", which no caller may read as either.</para>
+    ///
+    /// <para><b>Same cast, same container, same filter, same classification</b> as the radar's own
+    /// body casts: the avatar's <c>CharacterController.FilterInfo</c>, folded through
+    /// <see cref="FieldRayContacts.Gather"/>, so a ramp is not a wall and the avatar's own capsule
+    /// is not an obstacle. Only the ORIGIN differs, and nothing else about the lifetime rules
+    /// changes — no allocation, no <c>CreateInstance</c>, no second container.</para></summary>
+    public static bool TryCastAcross(float ox, float oy, float oz, FieldDirectionService.FlatDir dir,
+                                     float maxDistance, out RayHit hit)
+    {
+        hit = default;
+        if (!dir.Ok || !(maxDistance > 0f)) return false;
+        try
+        {
+            if (!EnsureRoute()) return false;
+            var result = FieldProbeService.SharedInstance(_resultType);
+            if (result == null) return false;
+
+            var avatar = PlayerAvatar();
+            var cc = CharaController(avatar);
+            var filter = FieldProbeService.Member(cc, "FilterInfo") as ManagedObject;
+            if (filter == null) return false;
+
+            var feet = AvatarFieldReader.ReadPlayerPos(null);
+            if (!feet.ok) return false;
+            float slopeCos = FieldRayMetrics.SlopeCos(cc);
+            float waist = FieldRayMetrics.WaistAboveFeet(avatar, cc, feet.y, _vecType);
+            float step = FieldRayMetrics.StepAboveFeet(avatar, feet.y, waist, _vecType);
+            ulong self = SelfAddress(avatar);
+
+            if (!Write(_start, ox, oy, oz) ||
+                !Write(_end, ox + dir.X * maxDistance, oy, oz + dir.Z * maxDistance)) return false;
+
+            result.Call("clear");
+            _castRayAll.InvokeBoxed(null, null,
+                new object[] { _start.View, _end.View, result, filter, DISABLE_BACK_FACING });
+
+            // Classify against the floor UNDER THIS RAY, not the player's: a step is judged from
+            // the ground the walker would be standing on, and a ray across a street is a metre
+            // lower or higher than the one the avatar happens to be on.
+            hit = FieldRayContacts.Gather(result, oy - FloorToWaistM, self, slopeCos, step);
+            return true;
+        }
+        catch (Exception ex)
+        {
+            if (!_failLogged)
+            {
+                _failLogged = true;
+                API.LogWarning($"[SF6Access] FieldRayCaster across probe failed: {ex.GetType().Name}: {ex.Message}");
+            }
+            return false;
+        }
+    }
+
+    /// <summary>Where a body-column cast sits above the floor it deals with, in metres. The radar
+    /// reads the live capsule; a remote ray has no capsule, only the caller's floor height, so this
+    /// is the same height by another route: what the middle of that same capsule would be.</summary>
+    private const float FloorToWaistM = 0.9f;
+
     /// <summary>The avatar the player is controlling, through the World Tour player
     /// manager. One place, because every reader here needs the same one.</summary>
     public static ManagedObject PlayerAvatar()

@@ -24,11 +24,16 @@ public static class MapIconSnapshot
         ("TRAVEL", DestinationCategory.Places, true),
         ("FACILITY", DestinationCategory.Shops, true),
         ("JOB", DestinationCategory.Jobs, true),
-        // Missions come and go with progress: offered this session, never written to disk.
-        ("MISSION", DestinationCategory.Missions, false),
+        // Missions come and go with progress, but they are drawn on the map like anything
+        // else and the player asked for the whole map, so they are stored too: a capture
+        // that still shows missions REPLACES the stored set (Merge), which is what stops a
+        // finished mission from lingering.
+        ("MISSION", DestinationCategory.Missions, true),
         ("MASTER", DestinationCategory.Masters, true),
         ("PIN", DestinationCategory.Pins, true),
     };
+
+    private const int MISSION_INDEX = 3;
 
     // The map stays open for seconds; its icon set does not change within one capture interval.
     // The first capture also waits this long after the map opens, while its panels are built.
@@ -54,6 +59,17 @@ public static class MapIconSnapshot
     {
         Load();
         return _byCity.TryGetValue(city, out var list) ? list : (IReadOnlyList<PlaceFile.Entry>)System.Array.Empty<PlaceFile.Entry>();
+    }
+
+    /// <summary>Every stored place, in every city — not only the one the player is in. A place in
+    /// a city they have LEFT is still a real place with a real position, and it is the only record
+    /// there is of the rest stations there; see <see cref="RestCatalog"/>.</summary>
+    public static IEnumerable<PlaceFile.Entry> AllPlaces()
+    {
+        Load();
+        var all = new List<PlaceFile.Entry>();
+        foreach (var list in _byCity.Values) all.AddRange(list);
+        return all;
     }
 
     /// <summary>Whether a capture is due; lets the caller skip its own checks between captures.</summary>
@@ -88,16 +104,53 @@ public static class MapIconSnapshot
             ReadGroup(window, city, _groupValues[g], entries);
             counts.Add($"{GROUPS[g].Name}={entries.Count - before}");
         }
-        if (entries.Count == 0) return;
+        if (entries.Count == 0)
+        {
+            // Logged, not silent: "the file was never written" and "nothing was read"
+            // used to look identical from the outside.
+            string empty = $"city {city}: " + string.Join(", ", counts);
+            if (empty != _lastSummary) { _lastSummary = empty; API.LogInfo($"[SF6Access] Map places: nothing read - {empty}"); }
+            return;
+        }
+
+        // The icon group enum has six members, but the player asked for places the picker
+        // does not show and a district may be drawn under a group the enum does not name.
+        // The extra groups are probed for their own sake and never stored: only what they
+        // hold decides whether they are worth capturing.
+        SweepUnknownGroups(window, city);
 
         Load();
         _byCity[city] = Merge(_byCity.TryGetValue(city, out var old) ? old : null, entries);
-        string summary = $"city {city}: " + string.Join(", ", counts);
+        string summary = $"city {city}: " + string.Join(", ", counts) + $", total {_byCity[city].Count}";
         if (summary == _lastSummary) return;
         _lastSummary = summary;
         bool saved = PlaceFile.Save(FilePath, Persisted());
         API.LogInfo($"[SF6Access] Map places captured - {summary}{(saved ? "" : " (not saved to disk)")}");
     }
+
+    /// <summary>Asks for icon groups beyond the enum's six, once per map. A group the enum
+    /// does not name is either invalid (returns nothing) or something the picker is missing;
+    /// either answer is worth one line of log.</summary>
+    private static void SweepUnknownGroups(ManagedObject window, uint city)
+    {
+        if (_swept) return;
+        _swept = true;
+        var found = new List<string>();
+        for (int group = 7; group <= 15; group++)
+        {
+            int n;
+            try { n = FlowHelper.GetListCount(FlowHelper.Call(window, "GetMapIconPanelList", group) as ManagedObject); }
+            catch { continue; }
+            if (n <= 0) continue;
+            var panel = FlowHelper.GetListItem(FlowHelper.Call(window, "GetMapIconPanelList", group) as ManagedObject, 0);
+            var info = FlowHelper.GetObjectField(panel, "Info");
+            string title = Flatten(FlowHelper.ResolveWLTags(FlowHelper.ReadStringField(info, "TitleText")));
+            found.Add($"g{group}={n} ('{title ?? "?"}')");
+        }
+        API.LogInfo($"[SF6Access] Map places: icon groups beyond the enum - " +
+                    (found.Count == 0 ? "none" : string.Join(", ", found)));
+    }
+    private static bool _swept;
 
     private static void ReadGroup(ManagedObject window, uint city, int group, List<PlaceFile.Entry> into)
     {
@@ -106,7 +159,15 @@ public static class MapIconSnapshot
         for (int i = 0; i < n; i++)
         {
             var info = FlowHelper.GetObjectField(FlowHelper.GetListItem(panels, i), "Info");
-            string title = Flatten(FlowHelper.ReadStringField(info, "TitleText"));
+            // A master's title arrives as the raw composing tag the GUI renders at draw
+            // time — <c>&lt;WLTAG CmdNo="2" Arg0="2" Arg1="4"&gt;</c> — which is what made
+            // every master on the map unusable as a destination. ResolveWLTags turns it
+            // into the name the player sees.
+            string title = Flatten(FlowHelper.ResolveWLTags(FlowHelper.ReadStringField(info, "TitleText")));
+            // A tag that did not resolve is not a name. Master titles arrive as composing
+            // tags and a batch of them resolved to nothing on 2026-10-02, leaving
+            // "<WLTAG CmdNo = "2" ...>" entries in the list next to the real ones.
+            if (string.IsNullOrEmpty(title) || title.Contains('<')) continue;
             object pos = info == null ? null : FieldProbeService.Member(info, "GlobalPos");
             if (string.IsNullOrEmpty(title) || pos == null) continue;
 
@@ -120,18 +181,37 @@ public static class MapIconSnapshot
         }
     }
 
-    /// <summary>Groups read this time replace their old entries; a group that came back
-    /// empty keeps what an earlier capture learned (its panels may not be built yet).</summary>
+    /// <summary>Freshly read entries are ADDED to what the city already knows. The map
+    /// only builds the panels it is showing, so a later capture can legitimately come back
+    /// with fewer than an earlier one — replacing wholesale would forget places the player
+    /// has already seen on the map. The one exception is the mission group: those really
+    /// do disappear when they are done, so a capture that still lists missions replaces the
+    /// remembered set.</summary>
     private static List<PlaceFile.Entry> Merge(List<PlaceFile.Entry> old, List<PlaceFile.Entry> fresh)
     {
-        var freshGroups = new HashSet<int>();
-        foreach (var e in fresh) freshGroups.Add(e.Group);
-        var merged = new List<PlaceFile.Entry>(fresh);
+        var seen = new HashSet<string>();
+        var merged = new List<PlaceFile.Entry>();
+        bool missionsRefreshed = false;
+        foreach (var e in fresh)
+        {
+            if (see(e)) merged.Add(e);
+            if (IsMission(e.Group)) missionsRefreshed = true;
+        }
         if (old != null)
             foreach (var e in old)
-                if (!freshGroups.Contains(e.Group)) merged.Add(e);
+                if (!IsMission(e.Group) || !missionsRefreshed)
+                    if (see(e)) merged.Add(e);
         return merged;
+
+        // Keyed on the PLACE, not on the exact vector: the same icon is re-read on every
+        // capture with a slightly different height, and taking every vector at face value
+        // listed the same shop two or three times over.
+        bool see(PlaceFile.Entry e) =>
+            seen.Add($"{e.Group}|{(int)(e.X / 4)}|{(int)(e.Z / 4)}|{e.Name}");
     }
+
+    private static bool IsMission(int group) =>
+        _groupValues != null && group == _groupValues[MISSION_INDEX];
 
     private static IEnumerable<PlaceFile.Entry> Persisted()
     {
@@ -160,11 +240,18 @@ public static class MapIconSnapshot
     {
         if (_byCity != null) return;
         _byCity = new Dictionary<uint, List<PlaceFile.Entry>>();
+        int kept = 0, dropped = 0;
         foreach (var e in PlaceFile.Load(FilePath))
         {
+            // Older files hold names that were never resolvable; they are not spoken, so
+            // they are not carried forward into the union.
+            if (e.Name.Contains('<')) { dropped++; continue; }
             if (!_byCity.TryGetValue(e.City, out var list)) _byCity[e.City] = list = new List<PlaceFile.Entry>();
             list.Add(e);
+            kept++;
         }
+        API.LogInfo($"[SF6Access] Map places: {kept} stored places loaded from disk" +
+                    (dropped > 0 ? $" ({dropped} unreadable names dropped)" : ""));
     }
 
     private static string FilePath => Path.Combine(ObjectDumper.DumpDir, FILE_NAME);

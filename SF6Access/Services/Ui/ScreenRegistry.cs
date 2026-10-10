@@ -114,11 +114,18 @@ public class ScreenRegistry
         // World Tour phone: Messages and Missions
         UiDispatcher.Register(new SF6Access.Hooks.WorldTour.DeviceIMHooks());
         UiDispatcher.Register(new SF6Access.Hooks.WorldTour.IMContentHooks());
+        // The passcode screen the Messages app opens (Y = add contact) — the
+        // digits on it were never read before.
+        UiDispatcher.Register(new SF6Access.Hooks.WorldTour.IMPasscodeHooks());
         UiDispatcher.Register(new SF6Access.Hooks.WorldTour.MissionListHooks());
         UiDispatcher.Register(new SF6Access.Hooks.WorldTour.MissionDetailHooks());
 
         // World Tour phone: Map (city map icons + fast-travel list)
         UiDispatcher.Register(new SF6Access.Hooks.WorldTour.DeviceMapHooks());
+
+        // World Tour: the WORLD MAP (countries/regions you can fly to). Separate
+        // flow (app.UIFlowWorldMap.*), never covered before — see WorldMapHooks.
+        UiDispatcher.Register(new SF6Access.Hooks.WorldTour.WorldMapHooks());
 
         API.LogInfo("[SF6Access] ScreenRegistry: adapters registered");
     }

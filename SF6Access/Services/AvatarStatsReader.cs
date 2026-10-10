@@ -66,23 +66,77 @@ public static class AvatarStatsReader
     public static List<Stat> ReadStatsOfItem(ManagedObject itemParam)
     {
         var result = new List<Stat>();
-        if (itemParam == null) return result;
-
-        var statusData = FlowHelper.Call(itemParam, "GetEquipStatus", false) as ManagedObject;
-        var dataList = FlowHelper.GetObjectField(statusData, "DataList");
-        int count = FlowHelper.GetListCount(dataList);
-        for (int i = 0; i < count; i++)
-        {
-            var data = FlowHelper.GetListItem(dataList, i);
-            if (data == null) continue;
-
-            int type = FlowHelper.ReadIntField(data, "Type");
-            float value = FlowHelper.ReadFloatField(data, "Value", 0f);
-            if (value == 0f) continue;   // the item doesn't have this stat — skip it
-
+        foreach (var (type, value) in ReadItemStatValues(itemParam))
             result.Add(new Stat(type, StatLabel(type), ((int)value).ToString()));
-        }
         return result;
+    }
+
+    /// <summary>
+    /// The stats several item params grant TOGETHER. A shop "set" (a costume of
+    /// top + bottom + shoes...) is sold as one product but is several
+    /// WTItemParams, and the equipped result is their sum — the shop panel
+    /// renders one compare row per piece, which is why it looked like one stat
+    /// was listed twice. Values of the same Type are added.
+    /// </summary>
+    public static List<Stat> ReadStatsOfItemParams(System.Collections.Generic.IEnumerable<ManagedObject> itemParams)
+    {
+        if (itemParams == null) return new List<Stat>();
+        var totals = new System.Collections.Generic.Dictionary<int, float>();
+        foreach (var p in itemParams)
+        {
+            if (p == null) continue;
+            foreach (var (type, value) in ReadItemStatValues(p))
+                totals[type] = totals.TryGetValue(type, out var prev) ? prev + value : value;
+        }
+        var result = new List<Stat>();
+        foreach (int type in SortedStatTypes(totals.Keys))
+            result.Add(new Stat(type, StatLabel(type), ((int)totals[type]).ToString()));
+        return result;
+    }
+
+    /// <summary>The (Type, Value) pairs a WTItemParam grants, zero entries skipped.</summary>
+    private static List<(int Type, float Value)> ReadItemStatValues(ManagedObject itemParam)
+    {
+        var result = new List<(int, float)>();
+        if (itemParam == null) return result;
+        try
+        {
+            var statusData = FlowHelper.Call(itemParam, "GetEquipStatus", false) as ManagedObject;
+            var dataList = FlowHelper.GetObjectField(statusData, "DataList");
+            int count = FlowHelper.GetListCount(dataList);
+            for (int i = 0; i < count; i++)
+            {
+                var data = FlowHelper.GetListItem(dataList, i);
+                if (data == null) continue;
+
+                int type = FlowHelper.ReadIntField(data, "Type");
+                float value = FlowHelper.ReadFloatField(data, "Value", 0f);
+                if (value == 0f) continue;   // the item doesn't have this stat — skip it
+
+                result.Add((type, value));
+            }
+        }
+        catch { }
+        return result;
+    }
+
+    /// <summary>Stat types in display order (the known combat stats first, then
+    /// anything else the data table invents, ascending).</summary>
+    private static System.Collections.Generic.IEnumerable<int> SortedStatTypes(
+        System.Collections.Generic.IEnumerable<int> types)
+    {
+        var known = new System.Collections.Generic.List<int>();
+        var other = new System.Collections.Generic.List<int>();
+        foreach (int t in types)
+        {
+            if (System.Array.IndexOf(CombatStatTypes, t) >= 0) known.Add(t);
+            else other.Add(t);
+        }
+        known.Sort((a, b) => System.Array.IndexOf(CombatStatTypes, a)
+                              .CompareTo(System.Array.IndexOf(CombatStatTypes, b)));
+        other.Sort();
+        known.AddRange(other);
+        return known;
     }
 
     /// <summary>
@@ -109,12 +163,20 @@ public static class AvatarStatsReader
         return result;
     }
 
-    /// <summary>Format stat rows as "Vitality 5658, Punch 128, ...".</summary>
+    /// <summary>Format stat rows as "Vitality 5658, Punch 128, ...".
+    /// One row per stat: the same Type twice (a set made of several item params
+    /// grants the same stat in each) is announced ONCE — the player is comparing
+    /// gear, not auditing the data table.</summary>
     public static string FormatStats(List<Stat> stats)
     {
         if (stats == null || stats.Count == 0) return null;
         var parts = new List<string>();
-        foreach (var s in stats) parts.Add($"{s.Label} {s.Value}");
+        var seen = new HashSet<int>();
+        foreach (var s in stats)
+        {
+            if (!seen.Add(s.Type)) continue;
+            parts.Add($"{s.Label} {s.Value}");
+        }
         return string.Join(", ", parts);
     }
 

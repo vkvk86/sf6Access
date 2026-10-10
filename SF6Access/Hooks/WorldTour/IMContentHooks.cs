@@ -1,3 +1,6 @@
+using System;
+using System.IO;
+using System.Text;
 using REFrameworkNET;
 using SF6Access.Services;
 using SF6Access.Services.Ui;
@@ -24,11 +27,20 @@ public sealed class IMContentHooks : SingleParamScreenAdapter
 
     protected override string ParamType => "app.worldtour.UIFlowIMContentScreen.IMContentFlowParam";
 
+    /// <summary>Polls to wait before deciding the thread really has nothing to
+    /// read (~2 s at ReadInterval 5), so a slow-loading thread is not written off
+    /// while it is still drawing.</summary>
+    private const int EMPTY_DUMP_POLLS = 24;
+
     private string _lastSpoken;
+    private int _polls;
+    private bool _dumped;
 
     protected override void OnBind()
     {
         _lastSpoken = null;
+        _polls = 0;
+        _dumped = false;
         API.LogInfo("[SF6Access] Message content active");
     }
 
@@ -36,8 +48,22 @@ public sealed class IMContentHooks : SingleParamScreenAdapter
 
     protected override void Poll()
     {
+        _polls++;
         var texts = GuiTextReader.ReadTextsByOwner(GUI_OWNER);
-        if (texts == null || texts.Count == 0) return;
+        if (texts == null || texts.Count == 0)
+        {
+            // An opened thread that says nothing is the worst failure there is —
+            // the player cannot tell an empty thread from a broken reader. Capture
+            // the scene once so the next pass can see what the thread is made of
+            // (a media attachment, a different GUI owner, nothing at all).
+            if (!_dumped && _polls >= EMPTY_DUMP_POLLS)
+            {
+                _dumped = true;
+                DumpSilentScreen();
+            }
+            return;
+        }
+        _dumped = true;   // it spoke — nothing to diagnose
 
         // A thread shows SEVERAL bubbles at once, not one. Walk the GUI in tree
         // order and pair each sender with the message that follows it; taking
@@ -89,4 +115,31 @@ public sealed class IMContentHooks : SingleParamScreenAdapter
     }
 
     private static string Clean(string raw) => FlowHelper.CleanTags(raw)?.Trim();
+
+    /// <summary>What is on screen when the thread reads as empty: every text with
+    /// its owner, so a differently-named GUI or a media-only message is visible
+    /// instead of guessed at.</summary>
+    private void DumpSilentScreen()
+    {
+        try
+        {
+            var sb = new StringBuilder();
+            sb.AppendLine($"=== IM CONTENT (silent thread) - {DateTime.Now:HH:mm:ss} ===");
+            try
+            {
+                foreach (var t in GuiTextReader.ReadSceneTexts(visibleOnly: false))
+                    sb.AppendLine($"  [{t.Owner}] {t.Name}{(t.Visible ? "" : " [hidden]")} = {t.Text}");
+            }
+            catch (Exception ex) { sb.AppendLine($"  [texts error: {ex.Message}]"); }
+            sb.AppendLine();
+
+            string path = Path.Combine(ObjectDumper.DumpDir, $"sf6access_imcontent_{DateTime.Now:HHmmss}.txt");
+            File.AppendAllText(path, sb.ToString());
+            API.LogInfo($"[SF6Access] Message content silent, dump written: {path}");
+        }
+        catch (Exception ex)
+        {
+            API.LogError($"[SF6Access] Message content dump failed: {ex.Message}");
+        }
+    }
 }

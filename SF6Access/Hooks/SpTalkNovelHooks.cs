@@ -87,8 +87,11 @@ public sealed class SpTalkNovelHooks : SingleParamScreenAdapter
             // screen reader stops speaking at a '\n', so a multi-row line was
             // read only up to its first break. Flatten newlines to spaces (as
             // GuideTextHooks/TutorialHooks already do) to speak the whole line.
-            if (t.Name == CONV_ELEMENT && !string.IsNullOrWhiteSpace(t.Text)) conversation = Flatten(t.Text);
-            else if (t.Name == NAME_ELEMENT && !string.IsNullOrWhiteSpace(t.Text)) name = Flatten(t.Text);
+            // Raw + voice icon tags: Text is tag-stripped by GuiTextReader, and
+            // tutorial dialogue names its buttons inline ("用<ICON …>向路人…").
+            string clean = FlowHelper.CleanTags(FlowHelper.SpeakableIcons(t.Raw ?? t.Text));
+            if (t.Name == CONV_ELEMENT && !string.IsNullOrWhiteSpace(t.Text)) conversation = Flatten(clean);
+            else if (t.Name == NAME_ELEMENT && !string.IsNullOrWhiteSpace(t.Text)) name = Flatten(clean);
         }
         if (string.IsNullOrEmpty(conversation) || conversation == _lastLine) return;
         _lastLine = conversation;

@@ -205,8 +205,10 @@ public class DialogHooks
             }
         }
 
-        title = CleanTags(title);
-        message = CleanTags(message);
+        // Voice inline button tags (<INPT id=…>) instead of stripping them to
+        // empty gaps — same fix as the dialogue/dialog-flow readers (2026-09-29).
+        title = FlowHelper.CleanTags(FlowHelper.SpeakableIcons(title));
+        message = FlowHelper.CleanTags(FlowHelper.SpeakableIcons(message));
 
         if (!string.IsNullOrEmpty(title) && !string.IsNullOrEmpty(message))
             return $"{title}. {message}";

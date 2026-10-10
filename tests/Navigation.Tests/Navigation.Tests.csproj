@@ -10,10 +10,18 @@
     <Compile Include="../../SF6Access/Services/WorldTour/NavigationNoticeMemory.cs" Link="NavigationNoticeMemory.cs" />
     <Compile Include="../../SF6Access/Services/WorldTour/NavReading.cs" Link="NavReading.cs" />
     <Compile Include="../../SF6Access/Services/WorldTour/LevelRoutePlanner.cs" Link="LevelRoutePlanner.cs" />
+    <Compile Include="../../SF6Access/Services/WorldTour/JumpLink.cs" Link="JumpLink.cs" />
+    <Compile Include="../../SF6Access/Services/WorldTour/NarrowPath.cs" Link="NarrowPath.cs" />
+    <Compile Include="../../SF6Access/Services/WorldTour/RouteBend.cs" Link="RouteBend.cs" />
+    <Compile Include="../../SF6Access/Services/WorldTour/StairFollow.cs" Link="StairFollow.cs" />
+    <Compile Include="../../SF6Access/Services/WorldTour/WalkEnd.cs" Link="WalkEnd.cs" />
+    <Compile Include="../../SF6Access/Services/WorldTour/StairStep.cs" Link="StairStep.cs" />
+    <Compile Include="../../SF6Access/Services/WorldTour/DropEdge.cs" Link="DropEdge.cs" />
     <Compile Include="../../SF6Access/Services/WorldTour/Destination.cs" Link="Destination.cs" />
     <Compile Include="../../SF6Access/Services/WorldTour/DestinationPicker.cs" Link="DestinationPicker.cs" />
     <Compile Include="../../SF6Access/Services/WorldTour/HoldTapDetector.cs" Link="HoldTapDetector.cs" />
     <Compile Include="../../SF6Access/Services/WorldTour/RegionTracker.cs" Link="RegionTracker.cs" />
     <Compile Include="../../SF6Access/Services/WorldTour/PlaceFile.cs" Link="PlaceFile.cs" />
+    <Compile Include="../../SF6Access/Services/WorldTour/RoundStep.cs" Link="RoundStep.cs" />
   </ItemGroup>
 </Project>

@@ -42,11 +42,22 @@ public static class MapSelectionMemory
 
         public readonly float X, Y, Z;
 
-        public Selection(string label, float x, float y, float z)
+        /// <summary>What was picked, when it is a ladder or door the picker listed
+        /// itself (<see cref="DestinationCategory.Access"/>). The beacon uses it to
+        /// say "climb here" on arrival instead of hunting for another way up.
+        /// Default for anything the phone map or the story supplied.</summary>
+        public readonly SelectionKind Kind;
+
+        public Selection(string label, float x, float y, float z, SelectionKind kind = SelectionKind.Point)
         {
-            Ok = true; Label = label; X = x; Y = y; Z = z;
+            Ok = true; Label = label; X = x; Y = y; Z = z; Kind = kind;
         }
     }
+
+    /// <summary>What a remembered point is, so the beacon can word its arrival.
+    /// <see cref="LadderUp"/>/<see cref="LadderDown"/> are the picker's own ladder
+    /// entries; <see cref="Point"/> is everything else.</summary>
+    public enum SelectionKind { Point, LadderUp, LadderDown, Door }
 
     private static Selection _current;
 
@@ -57,16 +68,17 @@ public static class MapSelectionMemory
     /// unreadable position: an exact origin means the read failed rather than that
     /// something sits at the world origin, the same rule the field readers already
     /// apply to gimmick positions.</summary>
-    public static void Remember(string label, float x, float y, float z)
+    public static void Remember(string label, float x, float y, float z,
+                                SelectionKind kind = SelectionKind.Point)
     {
         if (string.IsNullOrWhiteSpace(label)) return;
         if (x == 0f && y == 0f && z == 0f) return;
 
         bool changed = !_current.Ok || _current.Label != label
                        || _current.X != x || _current.Y != y || _current.Z != z;
-        _current = new Selection(label, x, y, z);
+        _current = new Selection(label, x, y, z, kind);
         if (changed)
-            API.LogInfo($"[SF6Access] Map selection: '{label}' at ({x:0.0}, {y:0.0}, {z:0.0})");
+            API.LogInfo($"[SF6Access] Map selection: '{label}' at ({x:0.0}, {y:0.0}, {z:0.0}) kinds={kind}");
     }
 
     /// <summary>Read <c>IconInfo.GlobalPos</c> off a map icon and remember it.

@@ -91,7 +91,7 @@ public static class MissionGuideReader
             LastMiss = "guide type not bound";
             if (!EnsureBound()) return default;
 
-            LastMiss = "no HUD mission guide in the scene";
+            LastMiss = "no HUD mission guide in the scene (components in scene=" + LastComponentCount + ")";
             var guide = FindGuide();
             if (guide == null) return default;
 
@@ -196,6 +196,12 @@ public static class MissionGuideReader
         if (scene == null) return null;
 
         var list = _findComponents.InvokeBoxed(typeof(object), scene, new object[] { runtimeType }) as ManagedObject;
-        return FlowHelper.GetListCount(list) > 0 ? FlowHelper.GetListItem(list, 0) : null;
+        LastComponentCount = FlowHelper.GetListCount(list);
+        return LastComponentCount > 0 ? FlowHelper.GetListItem(list, 0) : null;
     }
+
+    /// <summary>How many guide components the scene search last returned. Zero means the HUD
+    /// really is not loaded — which is a different problem from "loaded but following
+    /// nothing", and the two must not be confused when reading the log (2026-10-02).</summary>
+    public static int LastComponentCount { get; private set; } = -1;
 }
