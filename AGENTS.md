@@ -102,6 +102,11 @@ create no new flow param are only caught by F7). Dump keys work unfocused; lette
   if a literal is unavoidable, name and document where it comes from).
 - Only touch code relevant to the task; don't introduce new tech to fix a bug.
 - Do NOT create GitHub releases automatically — only when explicitly asked. Do NOT overwrite `.env`.
+- **Publishing a player-facing build:** `python tools/make-release.py --version vX.Y.Z --publish
+  --notes-file notes.md`. It builds Release, packs `release/SF6Access.zip` in REFramework layout
+  (`reframework/plugins/managed/...`) and attaches it to a GitHub Release, so players get it from
+  `https://github.com/vkvk86/sf6Access/releases/latest/download/SF6Access.zip`. **CI cannot do this**:
+  the build needs REFramework.NET.dll from the local game folder and `references/tolk`, both gitignored.
 - Temporary files go to the session scratchpad, never the project root or `D:\code`.
 - **NEVER create git worktrees or branches** — all work happens directly on `main` (user rule, stated
   repeatedly). If a background-session isolation guard demands a worktree, stop and tell the user
