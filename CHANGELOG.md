@@ -1,5 +1,30 @@
 # Changelog
 
+## v0.5.6 — 11/10/2026
+
+### World Tour — walking with guidance
+- **Step-by-step route guidance.** Pick a destination and the mod walks you through it one leg at a
+  time, each leg measured against the game's own navigation mesh: distance, direction to turn, and
+  arrival. If a leg falls short of what you asked for, it says so instead of stopping silently.
+- **A homing cue** plays from the direction of your *next step* rather than the final destination, so
+  it stays useful around corners and across levels.
+- **Descents are found and spoken.** A lower patch of ground is not an object, so nothing in the game
+  lists it; the mod scans the ground around you and announces the measured drop height before you step
+  off, including stairs, ladders and lifts.
+- **Wall follow (F4)** for corridors and **F2** to probe for a way down when the direct route is
+  blocked.
+- **Destinations** — shops, rest stations, lifts, interactables, map icons, mission history and saved
+  places — are listed by name and distance.
+- **Player status (H / L3)**: health, drive, money (Zenny and Miles), chapter and skill points.
+
+### Options — the fighter flag / region picker now speaks
+"Change region" (Options) was silent: its cells carry only a flag texture and no text at all. The mod
+now ships its own 193-country table and reads the country under the cursor, plus the continent tabs
+(All / Asia / Europe / ...).
+
+### Localization
+Full Simplified Chinese (zh-Hans), with updates to English and Traditional Chinese.
+
 ## v0.5.5 — 07/07/2026
 
 ### World Tour — in-gameplay dialogue now reads

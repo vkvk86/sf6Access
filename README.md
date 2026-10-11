@@ -39,7 +39,7 @@ The build needs the local game install (REFramework.NET assemblies) plus `refere
 which are in the repository — so releases are packaged on the author's machine, not by CI:
 
 ```bash
-python tools/make-release.py --version v0.6.0 --publish --notes-file notes.md
+python tools/make-release.py --version v0.5.6 --publish --notes-file notes.md
 ```
 
 Without `--publish` it only builds `release/SF6Access.zip`. Requires the .NET 10 SDK and
