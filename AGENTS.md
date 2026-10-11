@@ -15,7 +15,9 @@ REFramework.NET **C#** plugin that makes Street Fighter 6 usable with a screen r
 Capcom's RE Engine via REFramework. This repository began as a generic RE Engine modding skeleton (the
 `docs/lua-*` and `docs/csharp-*` reference files remain for that); it is now the SF6Access plugin.
 
-- Repo: https://github.com/Ali-Bueno/sf6Access.git (HTTPS)
+- Repo: https://github.com/vkvk86/sf6Access.git (HTTPS) — **this** is the repo we push to, account
+  `vkvk86`, branch `main`. `https://github.com/Ali-Bueno/sf6Access.git` is the upstream original we
+  forked from (same project name) — read-only for us, never push there.
 - Game path: `D:\games\steam\steamapps\common\Street Fighter 6`
 - Code path: `D:\code\re engine\sf6Access\SF6Access`
 - Build: `dotnet build` from the `SF6Access` folder (auto-copies the DLL into the game). Compile after
