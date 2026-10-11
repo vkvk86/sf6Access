@@ -99,6 +99,9 @@ public class ScreenRegistry
         UiDispatcher.Register(new TextInputDialogHooks());
 
         // New screen readers built on the foundation
+        // Fighter flag / region picker — its cells are images and it was never
+        // on any watch list, so the whole dialog was silent (GitHub issue)
+        UiDispatcher.Register(new HomeSelectHooks());
         UiDispatcher.Register(new AvatarResultHooks());
         UiDispatcher.Register(new WTMPauseHooks());
         UiDispatcher.Register(new DeviceItemAppHooks());

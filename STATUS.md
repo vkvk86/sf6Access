@@ -142,6 +142,7 @@ Analysis/documentation only; no code changes, build or new in-game verification.
 |---|---|---|
 | Main menu / Fighting Ground / tabs | done | `MainMenuHooks`, `FGMenuHooks`; fg/bh/wt tabs |
 | Options menu (+ sub-screens) | done | `OptionMenuHooks`, `OptionSubScreenHooks`; `OptionManager` polling |
+| Fighter flag / region picker | done | `HomeSelectHooks` on `app.UICFNSelectHomeDialog` (Options → Change region). The game ships NO name for these 194 flags (all message GUIDs zero, no table covers the ids, cells hold only a `via.gui.Texture`) → the mod carries its own 193-row table. Mapping is evidence-based, not modelled: `DumpTabIds` captured each continent tab's full id list from the game, screenshots of all 6 tabs proved the in-tab display order is English-alphabetical, so n-th alphabetical country = n-th id of that continent. Two legacy sort names matter: Swaziland (165, after Sudan) and "The former Yugoslav Republic of Macedonia" (172, after Switzerland). Id 169 unused, 999 = "Not set". All 48 log-derived (tab-index → id) constraints pass. Verified in game 2026-10-11 |
 | Key config | done | `KeyConfigHooks` |
 | Character / Stage / Side / League select | done | `CharacterSelectHooks`, `StageSelectHooks`, `SideSelectHooks`, `LeagueSelectHooks` |
 | Training — frame data / attack / reversal | done | `TrainingFrameDataHooks`, `TrainingAttackDataHooks`, `TrainingReversalHooks`, `TrainingMenuHooks` |
