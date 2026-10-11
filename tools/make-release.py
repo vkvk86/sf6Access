@@ -46,6 +46,13 @@ STAGE = os.path.join(RELEASE, "stage")
 SF6_PATH = r"C:\Program Files (x86)\Steam\steamapps\common\Street Fighter 6"
 REPO = "vkvk86/sf6Access"
 
+# The SDK lives in the user profile (installed there so no admin was needed); the dotnet.exe on
+# PATH (C:\Program Files\dotnet) is runtime-only and cannot build net10.0.
+DOTNET = os.environ.get("DOTNET_EXE") or (
+    r"C:\Users\jl\.dotnet\dotnet.exe"
+    if os.path.exists(r"C:\Users\jl\.dotnet\dotnet.exe") else "dotnet"
+)
+
 
 def run(cmd, **kw):
     print("  $", " ".join(cmd))
@@ -61,7 +68,7 @@ def run(cmd, **kw):
 def build():
     print("== building (Release) ==")
     r = subprocess.run(
-        ["dotnet", "build", "-c", "Release", "-p:SF6Path=%s" % SF6_PATH, PROJ],
+        [DOTNET, "build", "-c", "Release", "-p:SF6Path=%s" % SF6_PATH, PROJ],
         capture_output=True, text=True,
     )
     # The build copies into the game folder too; only hard errors matter here.
