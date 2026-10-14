@@ -257,6 +257,8 @@ public readonly struct BeaconDestination
         _selection = key;
         _cached = default; _cachedAt = 0;
         ApproachFinder.Reset();
+        // A new objective is a new column of world: its floor is somebody else's answer.
+        ObjectiveFloor.Reset();
         // A relay searched for the previous selection is a hop toward somewhere else: planning
         // is per-objective, and leaving it behind would guide toward the last target's stand-in.
         RelayPlanner.Reset();
@@ -279,36 +281,47 @@ public readonly struct BeaconDestination
         if (!me.ok) return plain with { Holding = true };
         var player = new Spot(me.x, me.y, me.z);
         var target = new Spot(x, y, z);
+        // <b>Put the marker on the floor it belongs to, once, before anything asks a question about
+        // it.</b> See <see cref="ObjectiveFloor"/>: an objective's Y hangs from whatever bone its
+        // designer picked, and a point in the air has no navmesh node — every route asked about it
+        // is refused, and the refusal looks exactly like a wall.
+        var aim = ObjectiveFloor.Aim(target);
         // The destination is itself the way up (a ladder the picker listed): the beacon walks
         // the player to it and then says how to use it. Handing it to LevelRoute would ask for
         // ladders TO the ladder, which is not a plan anyone can follow.
         if (accessKind != MapSelectionMemory.SelectionKind.Point)
         {
-            var toAccess = RouteTo(plain, target, word, out var accessAnswer);
+            var toAccess = RouteTo(plain, aim, word, out var accessAnswer);
             return toAccess with { AccessKind = accessKind, NoRoute = accessAnswer.Ok && !accessAnswer.Exists && !accessAnswer.StartOffMesh };
         }
-        var level = LevelRoute.Guide(_selection, target, player);
+        // Everything from here on decides things ABOUT THAT HEIGHT — which floor the objective is
+        // on, whether a landing or a hop lands beside it, how many metres of it are still missing —
+        // so it is told the floor, not the point in the air above it. Two metres is the band every
+        // one of those judgements is made in, and a marker that hangs is a metre of that band spent
+        // on a metre nobody can stand in.
+        var onFloor = aim.Equals(target) ? plain : plain with { TargetY = aim.Y, GoalY = aim.Y };
+        var level = LevelRoute.Guide(_selection, aim, player);
         switch (level.Phase)
         {
             case LevelRoute.Phase.Searching:
-                return plain with { Searching = true, NoRoute = true };
+                return onFloor with { Searching = true, NoRoute = true };
             case LevelRoute.Phase.Failed:
-                return Approach(plain, player);
+                return Approach(onFloor, player);
             case LevelRoute.Phase.Following:
                 // A plan can be followed while the world contradicts it. This is the exact shape of
                 // the 13:51 run: the objective three metres away, `plan: objective` claimed by the
                 // navmesh, and the player pushing the same hoarding through every turn instruction
                 // the plan gave them. So before a route is trusted, ask whether a body can actually
                 // get there — and follow the MEASURED way when one exists.
-                if (TryRound(plain, player, true, out var measured)) return measured;
-                var leg = RouteTo(plain, level.To, level.Final ? word
+                if (TryRound(onFloor, player, true, out var measured)) return measured;
+                var leg = RouteTo(onFloor, level.To, level.Final ? word
                                   : level.Lift ? RouteNotice.LiftWord()
                                   : level.Drop ? RouteNotice.DropWord()
                                   : level.Stair ? RouteNotice.StairWord()
                                   : level.Jump ? RouteNotice.JumpWord() : RouteNotice.LadderWord(), out var legAnswer);
                 bool hold = LevelRoute.LegResult(legAnswer, player);
                 var grip = LadderCatalog.GripOf(level.Link);
-                NoteLeg(level, plain.GoalY, player.Y, leg.NoRoute && !level.Final);
+                NoteLeg(level, onFloor.GoalY, player.Y, leg.NoRoute && !level.Final);
                 return leg with
                 {
                     Holding = leg.Holding || hold, NoRoute = leg.NoRoute && !hold && !level.Blocked, Blocked = level.Blocked,
@@ -321,7 +334,7 @@ public readonly struct BeaconDestination
                     // come from the plan's own two ends, so they are measured, not supposed. The
                     // plan's last-but-one field already carries To.Y - Exit.Y for every kind of
                     // leg, not only for drops — a stair is not exempt from saying how far it goes.
-                    StairM = MathF.Abs(level.DropM), ShortM = ShortOf(plain.GoalY, level),
+                    StairM = MathF.Abs(level.DropM), ShortM = ShortOf(onFloor.GoalY, level),
                     // The lift's own direction: down says "ride it down", and getting that word
                     // wrong leaves someone standing on a platform going the other way.
                     Lift = !level.Final && level.Lift, LiftDown = !level.Final && level.Lift && !level.Up,
@@ -345,35 +358,28 @@ public readonly struct BeaconDestination
         var direct = RouteTo(plain, target, word, out var answer);
         if (!direct.NoRoute) return direct;
 
-        // <b>2026-10-07 — put the marker on the ground before deciding nobody can walk to it.</b>
+        // <b>2026-10-14 — ask about the floor before deciding nobody can walk to the marker.</b>
         //
         // A mission marker's Y is a point on some object's own origin chain, not a floor: it can
-        // hang half a metre above the platform it belongs to, or sit under it, and then the height
-        // difference this guide reports is a measurement of nothing at all. Every search below
-        // asks questions about that number — including the search whose ring was just widened to
-        // ask at the objective's own height — and a marker two centimetres off the mesh answers
-        // every one of them with DestNodeNotFound.
+        // hang half a metre above the platform it belongs to, or be buried a metre inside it, and
+        // then every question this file asks is asked about that number. Every one comes back
+        // DestNodeNotFound, and the refusals stack up into a verdict about the world — "no ladder
+        // reach it", "no route exists" — when what they really describe is a point nobody stands in.
         //
-        // So before the guides start: find where the marker actually lands, and try that. Costs one
-        // extra navmesh question, and only ever after the direct walk has already failed. A floor
-        // is what the world says it is, so nothing guessed here can be offered — if the walk to it
-        // is not confirmed, it is dropped and everything carries on as before.
-        // EndOffMesh is the engine saying "there is no navmesh node AT that point" — the exact
-        // symptom of a marker hanging in the air, and NOT what you get for a marker whose node
-        // exists on an island the player cannot walk to. Gating on it keeps this to one extra
-        // question in the one case that needs it; asking unconditionally would spend a second
-        // query every refresh, and every query here comes out of the SAME 250 ms budget the
-        // approach search below lives on.
-        if (answer.Ok && !answer.Exists && answer.EndOffMesh
-            && TryGroundOf(target, out var ground) && MathF.Abs(ground.Y - target.Y) > 0.05f)
+        // The first attempt at this (2026-10-07) only ran when the engine said EndOffMesh, and only
+        // ever looked DOWN. Both limits cost routes. Looking down alone cannot find the floor a
+        // marker buried inside it stands ON — Metro City training centre, y=-9.8 asked when the
+        // walkable floor overhead was -8.0 — and waiting for EndOffMesh meant the narrow case was
+        // the ONLY case, though a marker may be refused for a hundred reasons at once.
+        //
+        // ObjectiveFloor asks once per marker, both ways along the column, and hands the marker back
+        // whole when neither ray finds anything near enough to belong to it. It costs one navmesh
+        // question, only ever after the direct walk has already failed, and nothing is offered from
+        // it unless the walk to the floor is separately confirmed.
+        if (!aim.Equals(target))
         {
-            var onFloor = RouteTo(plain, ground, word, out var floorAnswer);
-            if (!onFloor.NoRoute)
-            {
-                API.LogInfo($"[SF6Access] Marker at ({ground.X:0.0}, {target.Y:0.0}, {ground.Z:0.0}) hangs off the floor: " +
-                            $"the ground under it is {ground.Y:0.0} ({target.Y - ground.Y:+0.0;-0.0} m) and that is walkable");
-                return onFloor;
-            }
+            var toFloor = RouteTo(plain, aim, word, out var floorAnswer);
+            if (!floorAnswer.Throttled && floorAnswer.Ok && floorAnswer.Exists) return toFloor;
         }
 
         // <b>Before declaring a ladder search, ask whether a stand at the player's OWN level can be
@@ -386,29 +392,30 @@ public readonly struct BeaconDestination
         // difference is within one step and a reachable stand exists, that stand IS the answer and
         // no ladder is involved. This only ever runs where the old code was about to search
         // ladders anyway, and it only ever returns a point the navmesh confirmed walkable.
-        if (MathF.Abs(target.Y - player.Y) < JumpLink.StepM)
+        //
+        // ASKED ABOUT THE FLOOR since 2026-10-14, which is what that 2026-10-05 evening was asking
+        // for and could not get: the height this compares is the marker's, so a marker a metre off
+        // its own floor could read as a climb and be handed to the ladder search — the same wrong
+        // question asked by a slower route. `aim` is that marker's floor when one was measured, and
+        // the marker itself when none was, so nothing that worked here changed.
+        if (MathF.Abs(aim.Y - player.Y) < JumpLink.StepM)
         {
-            ApproachFinder.Probe(target.X, target.Y, target.Z, player.X, player.Y, player.Z);
-            if (ApproachFinder.TryGet(target.X, target.Y, target.Z, player.Y, out float ax, out float ay, out float az)
+            ApproachFinder.Probe(aim.X, aim.Y, aim.Z, player.X, player.Y, player.Z);
+            if (ApproachFinder.TryGet(aim.X, aim.Y, aim.Z, player.Y, out float ax, out float ay, out float az)
                 && MathF.Abs(ay - player.Y) < LevelRoute.LevelM)
             {
                 var nearby = RouteTo(plain, new Spot(ax, ay, az), word, out var nearbyAnswer);
                 if (!nearbyAnswer.Ok || nearbyAnswer.Exists)
-                    return nearby with { IsApproach = true, AboveM = target.Y - ay };
+                    return nearby with { IsApproach = true, AboveM = aim.Y - ay };
             }
         }
 
-        LevelRoute.Begin(_selection, target, player, askDirect: answer.EndOffMesh);
-        return plain with { Searching = true, NoRoute = true };
+        // ...and the ladder search searches for the FLOOR, not for the marker hanging over it. A
+        // plan is a chain of navmesh questions and every one of them ends at this point; asking them
+        // about air is how a reachable objective ends up logged as having no route at all.
+        LevelRoute.Begin(_selection, aim, player, askDirect: answer.EndOffMesh);
+        return onFloor with { Searching = true, NoRoute = true };
     }
-
-    /// <summary><b>The floor under an objective marker, when the world will say what it is.</b>
-
-    /// <para>A mission marker hangs on some object's own origin chain, so its Y is whatever that
-    /// object's designer picked — the soles, the chest, or a point in the air. Nothing in the game
-    /// promises there is floor beneath it, and until 2026-10-07 the guide asked its questions about
-    /// that number regardless: every probe at the objective's own height came back DestNodeNotFound
-    /// because the height was two centimetres of nothing.</para>
 
     // ── The proof, written down ────────────────────────────────────────────────────────────
     //
@@ -452,22 +459,17 @@ public readonly struct BeaconDestination
     }
 
 
-    /// <para>The cast starts a little ABOVE the marker for the reason <see cref="DropEdge.ProbeAboveM"/>
-    /// exists — starting exactly at a floor puts that floor behind the ray's own origin — and looks
-    /// down far enough to catch ground well below it, which is what a marker hanging over a pit
-    /// needs. What comes back is measured ground, never a guess: nothing is offered from this unless
-    /// the navmesh separately confirms somebody can walk to it.</para></summary>
-    private static bool TryGroundOf(Spot marker, out Spot ground)
-    {
-        ground = marker;
-        if (!FieldRayCaster.TryFloorBelow(marker.X, marker.Y + DropEdge.ProbeAboveM, marker.Z,
-                                          DropEdge.ProbeDropM, out float floorY))
-            return false;   // the cast could not run — not the same as "nothing there"
-        // NaN is what TryFloorBelow hands back when the ray ran and found nothing at all.
-        if (!float.IsFinite(floorY)) return false;
-        ground = marker with { Y = floorY };
-        return true;
-    }
+    // ── What took the place of TryGroundOf ────────────────────────────────────────────────
+    //
+    // This file used to carry its own floor probe: one ray downward from just above the marker,
+    // used once, only when the engine's answer said EndOffMesh. Both of those limits cost routes.
+    // Looking down alone cannot find the floor a marker buried inside its own object stands ON
+    // (2026-10-07, Metro City: the marker read -9.8 and the walkable floor overhead was -8.0), and
+    // waiting for EndOffMesh meant only the narrowest case was ever measured.
+    //
+    // <see cref="ObjectiveFloor"/> is that probe grown up and moved out: two rays along the one
+    // column, measured once per marker, handed back whole when neither finds a floor near enough to
+    // belong to it. Everything above asks about what it returns.
 
 
     /// <summary>

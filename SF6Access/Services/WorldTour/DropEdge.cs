@@ -63,6 +63,63 @@ internal static class DropEdge
     /// and near enough that a walk to the edge is still the walk the player is walking.</summary>
     internal const int Samples = 9;
 
+    /// <summary><b>A marker this far off the floor beneath it is hanging, not standing on anything
+    /// — and that is a fact about the marker, not about the world.</b>
+    ///
+    /// <para>An objective's Y is a point on some object's own origin chain: the soles, the chest,
+    /// or the middle of the air. Nothing in the game promises there is floor under it, and nothing
+    /// promises there is not three metres of it either. Below this distance the two are the same
+    /// thing and every question goes on being asked about exactly what it was asked about.</para></summary>
+    internal const float HangM = 0.5f;
+
+    /// <summary><b>Beyond this the marker is not hanging — it is somewhere else.</b> A marker whose
+    /// nearest floor is twenty metres below is a rooftop marker, and moving the question down would
+    /// be asking how to walk to the street instead of how to walk to the roof. Six metres is two
+    /// storeys: wide enough for a chest-height marker on a ledge, tight enough that another floor
+    /// is never mistaken for the one going spare.</summary>
+    internal const float HangLimitM = 6f;
+
+    /// <summary>
+    /// <b>Which floor a marker that stands on nothing actually belongs to.</b>
+    ///
+    /// <para>Two answers are measured and one of them is right. <paramref name="below"/> is the floor
+    /// beneath a marker reading a point in the air above its own ground — the common case, and the
+    /// one a downward ray finds at once. <paramref name="above"/> is the floor a marker buried
+    /// INSIDE the object it belongs to is standing under: live on 2026-10-07 the objective read
+    /// y=-9.8 while the walkable floor above it was -8.0, so asking about the marker itself asked
+    /// about a metre of nothing and every route ended there.</para>
+    ///
+    /// <para>The nearer of the two wins, because the marker's own floor is the NEAREST one by
+    /// definition — everything else in that column is a storey somebody else lives on. NaN means
+    /// neither measurement is this marker's business, and the caller then asks about the marker
+    /// exactly as it always did.</para>
+    /// </summary>
+    internal static float FloorOf(float markerY, float below, float above)
+    {
+        float pick = float.NaN, best = float.MaxValue;
+        Consider(below, markerY - below);
+        Consider(above, above - markerY);
+        return pick;
+
+        void Consider(float floorY, float rise)
+        {
+            if (!float.IsFinite(floorY) || !float.IsFinite(rise)) return;
+            float gap = MathF.Abs(rise);
+            if (gap < HangM || gap > HangLimitM || gap >= best) return;
+            best = gap;
+            pick = floorY;
+        }
+    }
+
+    /// <summary>True when a marker reading <paramref name="markerY"/> belongs to the floor at
+    /// <paramref name="floorY"/> rather than standing on nothing at all — the test behind
+    /// <see cref="FloorOf"/>, kept apart so it can be read without a ray.</summary>
+    internal static bool Hangs(float markerY, float floorY)
+    {
+        float gap = MathF.Abs(markerY - floorY);
+        return float.IsFinite(gap) && gap >= HangM && gap <= HangLimitM;
+    }
+
     /// <summary>True when a floor this far below the player's feet is a drop worth offering.</summary>
     internal static bool IsDrop(float standY, float floorY)
     {

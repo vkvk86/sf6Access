@@ -36,6 +36,12 @@ internal static class LevelRoute
     private static float ArriveM => MissionBeaconHooks.ARRIVED_M;
     private static float ReachM => 2f * MissionBeaconHooks.ARRIVED_M;
     private static readonly (float dx, float dz)[] Nudges = { (NudgeM, 0f), (-NudgeM, 0f), (0f, NudgeM), (0f, -NudgeM) };
+    /// <summary>The sideways nudges are four; this is the one that comes AFTER them and is not
+    /// sideways at all. See <see cref="Moved"/> — it is the try that moves a point onto its own
+    /// floor, and until 2026-10-14 there was no such try: four steps around a point hanging a metre
+    /// above the ground are still a metre above the ground, so the answer "no" was recorded four
+    /// times and then believed.</summary>
+    private static readonly int FloorNudge = Nudges.Length + 1;
 
     private static Phase _phase;
     private static string _key;
@@ -355,7 +361,20 @@ internal static class LevelRoute
         if (!a.Exists && (a.StartOffMesh || a.EndOffMesh))
         {
             if (_nudge == 0) { _offFrom = a.StartOffMesh; _offTo = a.EndOffMesh; }
-            if (_nudge < Nudges.Length) { _nudge++; return; }
+            if (_nudge < FloorNudge)
+            {
+                _nudge++;
+                // A VERTICAL TRY WITH NO FLOOR TO MOVE TO IS DROPPED, not spent. It would be the very
+                // same question asked at the very same point, and every question here comes out of the
+                // one limiter every search in the field shares: thirty seconds is already the price of
+                // knowing whether a route exists. See <see cref="Moved"/> for what the try does when
+                // there IS a floor.
+                if (_nudge == FloorNudge
+                    && !((_offFrom && ObjectiveFloor.HasFloor(_planner.SpotOf(q.From)))
+                         || (_offTo && ObjectiveFloor.HasFloor(_planner.SpotOf(q.To)))))
+                    _nudge = FloorNudge + 1;
+                return;
+            }
             // No question can reach a target that stays off the navmesh.
             _abort = q.To == Target && _offTo;
             _planner.Answer(false);
@@ -371,6 +390,21 @@ internal static class LevelRoute
     {
         var s = _planner.SpotOf(id);
         if (!off || _nudge == 0) return s;
+        // THE LAST TRY IS VERTICAL, and it is here for the reason every other nudge cannot serve:
+        // four sideways steps around a point that hangs half a metre over its own floor are still
+        // half a metre over it. A ladder foot read off the wrong bone, a stair mouth measured to its
+        // tread and not to the ground beside it, an objective marker nobody ever promised was at
+        // floor level — one column each, and the column is what the engine has no node in.
+        //
+        // ObjectiveFloor measures the same column both ways (the floor below it, or the floor a
+        // buried point stands under) and hands the point back unchanged when neither ray finds
+        // anything near enough to belong to it. Nothing here is guessed: if no floor is measured the
+        // try is identical to the sideways ones, and costs the same one question.
+        if (_nudge == FloorNudge)
+        {
+            var floor = ObjectiveFloor.At(s);
+            return floor.Equals(s) ? s : floor;
+        }
         var (dx, dz) = Nudges[_nudge - 1];
         return new Spot(s.X + dx, s.Y, s.Z + dz);
     }

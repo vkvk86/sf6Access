@@ -219,6 +219,30 @@ Check(Plan(onTop, atBottom, new[] { ledge }).Plan![0].Drop
       && !Plan(ground, roofA, new[] { toA }).Plan![0].Drop,
       "a descent leg carries its own kind, so the words fit a fall and not a step");
 
+// --- 2026-10-14, Metro City training centre twice in one night: the marker was never on the floor ---
+//
+// Two evenings apart, the same metric picture. An objective read y=-8.8 while every drop that could
+// reach it landed at -9.8: eight measured ways down, and not one second leg the engine would confirm.
+// Later the same week the marker read -9.8 while the walkable floor ABOVE it was -8.0. Neither is a
+// story about stairs or walls. Both are a question asked about a point no avatar has ever stood in,
+// which a navmesh answers the only way it can: there is no node there, therefore there is no route.
+//
+// DropEdge.FloorOf is the judgement; ObjectiveFloor is what measures the two floors it chooses
+// between. Nothing here touches the engine, because nothing here has to.
+Check(DropEdge.Hangs(-8.8f, -9.8f), "a marker a metre above its own floor is hanging, not standing on anything");
+Check(!DropEdge.Hangs(-9.8f, -9.8f), "a marker already on the floor is left exactly where it is");
+Check(!DropEdge.Hangs(-8.0f, -20f), "twelve metres of air is another floor, not a hanging marker");
+Check(DropEdge.FloorOf(-8.8f, -9.8f, float.NaN) == -9.8f,
+      "the floor UNDER a hanging marker is what every route is asked about");
+Check(DropEdge.FloorOf(-9.8f, -25f, -8.0f) == -8.0f,
+      "the floor a buried marker stands ON is what every route is asked about");
+Check(DropEdge.FloorOf(-8.8f, -9.8f, -8.0f) == -8.0f,
+      "of two floors in one column, the nearer one is the marker's own");
+Check(float.IsNaN(DropEdge.FloorOf(-8.8f, float.NaN, float.NaN)),
+      "no floor measured means nothing corrected: the marker is handed back whole");
+Check(float.IsNaN(DropEdge.FloorOf(-8.8f, -9.0f, float.NaN)),
+      "a marker twenty centimetres off the ground is standing on it, and no question moves");
+
 // --- 2026-10-07, 17:13, Metro City training centre: the measured shape of one night's failure ---
 // The objective stood 7.2 m below and 22 m away. The sweep found three flights of stairs, so the
 // ground around the player was never measured, and the search ran out after 23 questions with
