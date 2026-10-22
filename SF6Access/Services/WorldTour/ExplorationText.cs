@@ -37,6 +37,7 @@ internal static class ExplorationText
         string.Format(Get("interactable_no", "Interactable object {0}"), n);
     internal static string Nearby(string word) => string.Format(Get("nearby", "Near {0}. Interaction not confirmed"), word);
     internal static string Available(string word) => string.Format(Get("available", "Available: {0}"), word);
+    internal static string Interact(string word) => string.Format(Get("interact", "Interact: {0}"), word);
     internal static string RouteLost() => Get("route_lost", "Route unavailable. The sound points directly toward the destination");
     internal static string RouteRestored() => Get("route_restored", "Following the walking route");
     internal static string Approach() => Get("approach", "Nearby point only. An entrance to the objective has not been found");

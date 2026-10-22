@@ -8,7 +8,10 @@ using SF6Access.Services.WorldTour;
 
 namespace SF6Access.Hooks.WorldTour;
 
-/// <summary>Automatic route bearing, route-state notices and contact-based arrival.</summary>
+/// <summary>Route steering by sound; speech reports contact, traversal needs and route availability.
+/// Upstream v0.6.0 moved speech onto <see cref="FieldFeedback"/>'s interruption-safe policy lanes;
+/// the homing-cue rules (never silent while a target is held, cue points at the next step, cue outlives
+/// the search) and the full pump pipeline below are ours and stay.</summary>
 public class MissionBeaconHooks
 {
     // ---------------------------------------------------------------------------------
@@ -43,7 +46,9 @@ public class MissionBeaconHooks
 
     internal const float ARRIVED_M = 4f; // Existing proximity band; no longer confirms interaction.
     private const long ReaderHoldMs = 1200;
-    private const long ResolveMs = 500; // Two route refreshes/sec, independent of frame rate.
+    private const long ResolveMs = FieldNavPath.MinQueryIntervalMs; // Two route refreshes/sec, aligned with the shared throttle.
+    // Let a rate-limited query recover, but do not keep pointing at an old corner on a ladder.
+    private const long FixLifetimeMs = 4 * ResolveMs;
     private const long RepeatMs = 15000;
     private const long DirectionHoldMs = 4000;
     // How often the "nothing walkable reaches it" sentence is repeated while the player stands at
@@ -62,19 +67,22 @@ public class MissionBeaconHooks
     // (tester 2026-09-26: at 2.5 s it was "impossible to follow"). The cadence still speeds up near.
     private const int CueNearGapMs = 100, CueFarGapMs = 500;
     private static readonly HomingCue Cue = new("mission beacon.mp3", ARRIVED_M, 60f, CueNearGapMs, CueFarGapMs);
+    // Upstream's scheduler: reserves the next path-query slot for live steering when a reader
+    // delays it, instead of a bare interval, so a throttled query is retried at the native gate.
+    private static readonly RouteQuerySchedule Schedule = new(ResolveMs);
     private const long FaultLogMs = 10000;
-    private static long _nextResolve, _nextWords, _nextTurn;
+    private static long _nextWords, _nextTurn;
     private static long _nextFaultLog;
     private static string _faultKey;
     private static long _nextFoot, _nextSearchNote;
     // When the objective entered the "near but the game offers no interaction" limbo (0 = not in it).
     private static long _nearNoContactSince;
     private static int _searchNotesSpoken;
-    private static string _key, _lastState;
+    private static string _key, _lastState, _spokenState, _pendingStatus;
     private static int _lastHour;
     private static int _lastTurnPhase;
     private static float _lastMeters;
-    private static bool _haveFix, _atContact, _ladderOffered;
+    private static bool _haveFix, _atContact, _contactNow, _ladderOffered, _active;
     private static bool _autoWalkToldOff, _autoWalkAnnounced;
     // The player's own last position and the tick it was read at, so "is the PLAYER
     // moving the avatar" can be answered from the game's own reading of the player
@@ -87,6 +95,7 @@ public class MissionBeaconHooks
     private static float LastFastX, LastFastZ;
     private static long _lastFastTick;
     private static BeaconDestination _fix;
+    private static long _fixAt;
     /// <summary>Is the homing cue allowed to sound. Separate from <see cref="_haveFix"/> on
     /// purpose: a fix is a destination the planner has finished deciding, and things that DRIVE
     /// from it (the step-by-step walk, the other beacons yielding the air) must wait for that.
@@ -100,16 +109,24 @@ public class MissionBeaconHooks
     /// again so the switch is logged once and not once per frame.</summary>
     private static bool _cueToGoal;
     internal static bool Homing => _haveFix;
+    internal static bool Guiding { get; private set; }
+    internal static bool NeedsObstacleDiscovery => Guiding && !_fix.Searching &&
+        (_fix.NoRoute || _fix.Blocked || _fix.AtFoot || _fix.Closest);
 
     [PluginEntryPoint]
-    public static void Initialize() => API.LogInfo("[SF6Access] MissionBeaconHooks initialized (automatic route status and contact arrival)");
+    public static void Initialize() => API.LogInfo("[SF6Access] MissionBeaconHooks initialized (quiet route guidance)");
 
     [Callback(typeof(LateUpdateBehavior), CallbackType.Post)]
     public static void Tick()
     {
         FieldPresenceService.Refresh();
-        if (!FieldPresenceService.CanSpeak) { Reset(); return; }
-        if (PadGuideHooks.Active || SpTalkNovelHooks.DialogueActive) { Hush(); return; }
+        if (!FieldFeedback.CanOutput)
+        {
+            if (_active) Reset();
+            _active = false;
+            return;
+        }
+        _active = true;
         // EVERY SENSING CALL BELOW IS GUARDED, and that is the point rather than defensive
         // decoration. On 2026-10-05 a single out-of-range index inside LevelRoute.Pump threw
         // on every frame from 13:31:05.906 to the end of the session. Nothing crashed and
@@ -122,7 +139,7 @@ public class MissionBeaconHooks
         try { LevelRoute.Pump(); }
         catch (Exception ex) { Fault("LevelRoute.Pump", ex); LevelRoute.Reset(); }
         // The step-by-step walk: its ray search has to be affordable inside about half a second,
-        // because a search whose root the player has already walked away from describes somewhere
+        // because a search searching from a root the player has walked away from describes somewhere
         // they no longer are — the same reason RoundPlanner casts from here rather than from
         // Resolve's twice-a-second grid.
         // The step-by-step walk needs a destination that has finished being decided. While the
@@ -130,7 +147,7 @@ public class MissionBeaconHooks
         // does not (see <see cref="_cueOn"/>): a silent beacon is the one failure this project
         // exists to prevent, and it is what the owner reported on 2026-10-07 ("voice only, the
         // homing sound was not taking me there").
-        if (_haveFix && !_fix.Searching)
+        if (_haveFix && !_fix.Searching && Schedule.MayPump)
         {
             var step = AvatarFieldReader.ReadPlayerPos(WorldTourStateService.GetAvatarManager());
             if (step.ok)
@@ -202,14 +219,17 @@ public class MissionBeaconHooks
             var at = AvatarFieldReader.ReadPlayerPos(WorldTourStateService.GetAvatarManager());
             if (at.ok && WalkSteps.SpeakNow(_fix, at.x, at.y, at.z, now)) return;
         }
-        if (now >= _nextResolve)
+        // Navigation samples never wait for the reader: speech must not freeze the steering target.
+        if (Schedule.Due(now))
         {
-            _nextResolve = now + ResolveMs;
+            bool waiting = false;
             // Same reason as the guards above: Resolve decides WHAT the beacon is pointing
             // at, but the cue is sounded above and must not depend on this succeeding.
-            try { Resolve(now); }
+            try { waiting = Resolve(now); }
             catch (Exception ex) { Fault("Resolve", ex); }
+            Schedule.Resolved(now, waiting, FieldNavPath.NextQueryTick, LevelRoute.BackgroundSearch);
         }
+        if (now - _fixAt > FixLifetimeMs && !AutoWalk.Active) Hush();
     }
 
     /// <summary><b>Name a fault once, in words a tester can find, and carry on.</b> The
@@ -229,16 +249,24 @@ public class MissionBeaconHooks
         API.LogInfo($"[SF6Access] FAULT {key} — {ex.Message}; the bearing and the homing cue keep running");
     }
 
-    private static void Resolve(long now)
+    private static bool Resolve(long now)
     {
         var dest = BeaconDestination.Resolve();
-        if (!dest.Ok) { Reset(); return; }
+        if (!dest.Ok)
+        {
+            if (Guiding || _key != null) Reset();
+            return false;
+        }
+        Guiding = true;
         var player = AvatarFieldReader.ReadPlayerPos(WorldTourStateService.GetAvatarManager());
-        if (!player.ok) { Hush(); return; }
+        if (!player.ok) { Hush(); return dest.WaitingForQuery; }
         var avatar = FieldRayCaster.PlayerAvatar();
         if (dest.Key != _key)
         {
-            _key = dest.Key; _lastState = null; _lastHour = 0; _lastTurnPhase = 0; _nextWords = _nextTurn = 0; _atContact = false;
+            Hush(); ForgetWords();
+            _key = dest.Key; _lastState = _spokenState = _pendingStatus = null;
+            _lastHour = 0; _lastTurnPhase = 0; _nextWords = _nextTurn = 0;
+            _atContact = _ladderOffered = false; _fix = default;
             _nearNoContactSince = 0; // a fresh destination starts with a clean limbo slate
             // A DIFFERENT destination means the player made a fresh choice — pressed A on
             // something new. That is the one moment a previous "this reading does not drive
@@ -248,18 +276,27 @@ public class MissionBeaconHooks
             // verdict is genuinely about the engine and is kept.
             AutoWalk.BeginWalk();
         }
-        if (dest.Holding) return;
+        if (dest.Holding) return dest.WaitingForQuery;
+        _fix = dest; _fixAt = dest.SampledAt;
         float distance = MathF.Sqrt(FieldAccessCatalog.DistanceSq(dest.TargetX, dest.TargetY, dest.TargetZ,
             player.x, player.y, player.z));
-        bool contact = !dest.IsTracked && !dest.IsApproach && !dest.Ladder && FieldActionReader.AtMissionContact();
+        // Upstream v0.6.0: a live-tracked actor reports its own contact state; the mission
+        // objective keeps the reader's own check.
+        bool contact = dest.InContact || (!dest.IsTracked && !dest.IsApproach && !dest.Ladder && FieldActionReader.AtMissionContact());
+        _contactNow = contact;
         if (contact)
         {
             Hush();
-            if (!_atContact) ScreenReaderService.Speak(ExplorationText.Get("mission_contact", "Objective within interaction range"), interrupt: true);
-            _atContact = true;
+            FieldFeedback.Forget("route-state");
+            if (!_atContact)
+                FieldFeedback.Say("route-contact", dest.IsTracked
+                    ? string.Format(ExplorationText.Get("destination_contact", "{0} within interaction range"), dest.Word)
+                    : ExplorationText.Get("mission_contact", "Objective within interaction range"),
+                    FieldSpeechPriority.Interaction, onSpoken: () => _atContact = true, stillValid: () => _contactNow);
             _nearNoContactSince = 0; // interaction confirmed: the limbo is over
-            return;
+            return dest.WaitingForQuery;
         }
+        FieldFeedback.Forget("route-contact");
         _atContact = false;
         // THE CUE MUST NEVER GO QUIET WHILE A TARGET IS HELD. A first attempt at this code muted it
         // whenever no walkable link reached the objective ("the bearing points through a wall, so
@@ -268,40 +305,36 @@ public class MissionBeaconHooks
         // A bearing that meets a wall is still the whole answer to "which way is it"; what was
         // missing was not silence but the one extra fact: something stands between. So the cue
         // keeps playing and the hint rides ALONGSIDE the bearing, never in place of it (2026-10-02).
-        _fix = dest; _haveFix = !dest.Searching;
-        // THE CUE OUTLIVES THE SEARCH. Until 2026-10-07 this line's predecessor was the whole
-        // of the cue's on-switch, and a search — up to 120 navmesh questions, i.e. half a minute
-        // at the shared throttle — turned the beacon OFF for as long as it ran. What the player
-        // got in that half minute was speech and nothing else, which is precisely the state the
-        // comment above this one was written to forbid.
-        //
-        // A search is not a reason to stop pointing. Nothing has been decided yet, so what the
-        // cue points at is the objective itself — the plain bearing, no route, no bend — which is
-        // exactly what the bearing is for and exactly what "which way is it" means. Once the
-        // planner answers, the aim narrows to the leg it chose and the cue follows it there.
+        // THE CUE OUTLIVES THE SEARCH (2026-10-07): a search is not a reason to stop pointing.
+        // Nothing has been decided yet, so what the cue points at is the objective itself — the
+        // plain bearing, no route, no bend — which is exactly what "which way is it" means.
+        _haveFix = !dest.Searching && !dest.Unconfirmed;
         _cueOn = true;
         // Leaving a "near" state takes twice the distance, so standing at the edge does not repeat it.
         bool near = distance <= (RouteNotice.IsNear(_lastState) ? 2 * ARRIVED_M : ARRIVED_M);
         string state = RouteNotice.State(dest, near);
-        bool stateChanged = state != _lastState;
-        string previous = _lastState;
-        _lastState = state;
-        if (stateChanged)
+        if (state != _lastState)
         {
-            string status = RouteNotice.Text(state, previous, dest, distance, player.y);
-            if (status != null)
-            {
-                ScreenReaderService.Speak(status, interrupt: true);
-                API.LogInfo("[SF6Access] Mission navigation: " + status);
-                _nextWords = now + DirectionHoldMs;
-                return;
-            }
+            string previous = _lastState;
+            _lastState = state;
+            _spokenState = null;
+            FieldFeedback.Forget("route-state");
+            _pendingStatus = RouteNotice.Text(state, previous, dest, distance, player.y);
+            if (_pendingStatus != null) API.LogInfo("[SF6Access] Mission navigation: " + _pendingStatus);
+        }
+        // An explicit readout may defer this notice. Commit only when heard, and retry only while still true.
+        if (_pendingStatus != null && _spokenState != state)
+        {
+            FieldFeedback.Say("route-state", _pendingStatus, FieldSpeechPriority.Route,
+                onSpoken: () => _spokenState = state, stillValid: () => _lastState == state && !_contactNow);
+            _nextWords = now + DirectionHoldMs;
+            return dest.WaitingForQuery;
         }
         // THE GRAND TOUR (T key). Its arrivals, its skips and its "this stop cannot be
         // reached" verdicts are decided from the destination this resolver already holds:
         // one observer, no second route planner, no new engine calls. True when the tour
         // spoke, taking the same yield-the-tick convention every speech site here follows.
-        if (TourService.Observe(dest, player.x, player.y, player.z, now)) return;
+        if (TourService.Observe(dest, player.x, player.y, player.z, now)) return dest.WaitingForQuery;
         // F4 — THE WALL ON THE RIGHT (owner, 2026-10-04). It was switched on by hand, so while it
         // is running it takes the sentence: the player asked to be walked along the wall, and what
         // it says is a step like any other. The bearing and the homing cue are untouched by it —
@@ -309,10 +342,10 @@ public class MissionBeaconHooks
         if (WallFollow.TrySpeak(player.x, player.y, player.z, now))
         {
             _nextWords = now + DirectionHoldMs;
-            return;
+            return dest.WaitingForQuery;
         }
-        if (AnnounceSearchProgress(now)) return;
-        if (dest.Searching) return;
+        if (AnnounceSearchProgress(now)) return dest.WaitingForQuery;
+        if (dest.Searching) return dest.WaitingForQuery;
         // AUTO-WALK: while a target is selected, the mod drives the avatar toward the
         // current aim itself, using the game's own walk driver (AutoWalk). The beacon's
         // turn-by-turn speech is suppressed while driving — telling the player "turn
@@ -352,7 +385,7 @@ public class MissionBeaconHooks
         {
             AnnounceAutoWalkStart();
             _nextWords = now + DirectionHoldMs;
-            return;
+            return dest.WaitingForQuery;
         }
         if (AutoWalk.LastStop == AutoWalk.Stop.PlayerTookOver && !_autoWalkToldOff)
         {
@@ -363,7 +396,7 @@ public class MissionBeaconHooks
         {
             _autoWalkToldOff = false;
         }
-        if (AnnounceLadderGrip(dest, near, player.x, player.y, player.z)) { _nextWords = now + DirectionHoldMs; return; }
+        if (AnnounceLadderGrip(dest, near, player.x, player.y, player.z)) { _nextWords = now + DirectionHoldMs; return dest.WaitingForQuery; }
         // THE WALK ITSELF, one step at a time. The bearing says WHICH WAY the objective is; this
         // says HOW: "第 2 步：朝 5 点方向走 12 米", and when no route reaches it at all, a measured
         // direction to TRY that lands nearer, re-searched on arrival so the player is walked
@@ -374,7 +407,7 @@ public class MissionBeaconHooks
         if (WalkSteps.TrySpeak(dest, player.x, player.y, player.z, now))
         {
             _nextWords = now + DirectionHoldMs;
-            return;
+            return dest.WaitingForQuery;
         }
         var forward = FieldDirectionService.GetCameraForward();
         float toCorner = MathF.Sqrt(FieldAccessCatalog.DistanceSq(dest.X, player.y, dest.Z,
@@ -391,7 +424,7 @@ public class MissionBeaconHooks
                     Math.Max(1, (int)MathF.Round(toCorner)));
             ScreenReaderService.Speak(instruction, interrupt: false);
             _lastTurnPhase = turnPhase; _nextWords = _nextTurn = now + DirectionHoldMs;
-            return;
+            return dest.WaitingForQuery;
         }
         if (turnPhase == 0) _lastTurnPhase = 0;
         // THE BEARING FOLLOWS THE CUE. When no walk reaches the leg, both point at the objective
@@ -406,7 +439,7 @@ public class MissionBeaconHooks
                   player.x, player.y, player.z))
             : dest.RouteM > 0 ? dest.RouteM : distance;
         bool changed = hour != _lastHour || meters < _lastMeters / 2 || meters > _lastMeters * 2;
-        if (now < _nextWords || (!changed && now < _nextWords + RepeatMs - DirectionHoldMs)) return;
+        if (now < _nextWords || (!changed && now < _nextWords + RepeatMs - DirectionHoldMs)) return dest.WaitingForQuery;
         string what = offLeg && !string.IsNullOrEmpty(dest.GoalWord) ? dest.GoalWord
                                                                      : RouteNotice.Heading(dest);
         string text = hour > 0 ? LocalizedText.AtClockMeters(what, hour, (int)MathF.Round(meters))
@@ -447,6 +480,7 @@ public class MissionBeaconHooks
         ScreenReaderService.Speak(text, interrupt: false);
         API.LogInfo("[SF6Access] Mission navigation: " + text);
         _lastHour = hour; _lastMeters = meters; _nextWords = now + DirectionHoldMs;
+        return dest.WaitingForQuery;
     }
 
     /// <summary><b>How fast the player themselves is moving the avatar, in metres per
@@ -524,14 +558,19 @@ public class MissionBeaconHooks
     }
 
     /// <summary>At a planned ladder: says once when the game starts offering it, and logs what the game offers.</summary>
-    private static bool AnnounceLadderGrip(in BeaconDestination dest, bool near, float x, float y, float z)    {
-        if (!dest.Ladder || !near) { _ladderOffered = false; return false; }
+    private static bool AnnounceLadderGrip(in BeaconDestination dest, bool near, float x, float y, float z)
+    {
+        if (!dest.Ladder || !near)
+        { _ladderOffered = false; FieldFeedback.Forget("route-ladder"); return false; }
         LadderAccess.Diagnose(dest.LadderAccess, dest.BottomRungM, x, y, z);
         bool offered = LadderAccess.Offered(dest.LadderAccess);
-        bool fresh = offered && !_ladderOffered;
-        _ladderOffered = offered;
-        if (fresh) ScreenReaderService.Speak(RouteNotice.LadderOffered(), interrupt: true);
-        return fresh;
+        if (offered && !_ladderOffered)
+            FieldFeedback.Say("route-ladder", RouteNotice.LadderOffered(), FieldSpeechPriority.Interaction,
+                onSpoken: () => _ladderOffered = true,
+                stillValid: () => _fix.Ladder && LadderAccess.Offered(_fix.LadderAccess));
+        if (!offered) FieldFeedback.Forget("route-ladder");
+        if (!offered) _ladderOffered = false;
+        return false;
     }
 
     private static void Ping()
@@ -622,7 +661,7 @@ public class MissionBeaconHooks
         else if (_cueToLanding) _cueToLanding = false;
 
         Cue.Sound(FieldDirectionService.GetCameraForward(), ax - player.x, az - player.z,
-            _fix.RouteM > 0 ? _fix.RouteM : direct);
+            _fix.RouteM > 0 ? _fix.RouteM : direct, route: true);
     }
 
     /// <summary>How near the aim has to be for "the aim is underfoot" to be true. Smaller than
@@ -631,13 +670,22 @@ public class MissionBeaconHooks
     private const float LipAimM = 2.5f;
 
     private static void Hush() { _haveFix = false; _cueOn = false; Cue.Reset(); }
+    internal static void Cancel() => Reset();
+    private static void ForgetWords()
+    {
+        FieldFeedback.Forget("route-state");
+        FieldFeedback.Forget("route-contact"); FieldFeedback.Forget("route-ladder");
+    }
     private static void Reset()
     {
-        Hush(); _key = _lastState = null; _nextWords = 0; _atContact = _ladderOffered = false; _lastTurnPhase = 0;
+        Hush(); ForgetWords(); Guiding = false;
+        _key = _lastState = _spokenState = _pendingStatus = null; _nextWords = _nextTurn = 0;
+        _atContact = _contactNow = _ladderOffered = false; _lastTurnPhase = 0;
         _nextSearchNote = 0; _nextFoot = 0; _searchNotesSpoken = 0; _nearNoContactSince = 0;
         _autoWalkToldOff = _autoWalkAnnounced = false;
         LastPlayerX = LastPlayerY = LastPlayerZ = 0f; _lastPlayerTick = 0;
         LastFastX = LastFastZ = 0f; _lastFastTick = 0;
+        _fix = default; _fixAt = 0; Schedule.Reset();
         AutoWalk.Reset();
         // The spoken walk belongs to the spot it was measured in; another field or another
         // objective leaves none of it standing.

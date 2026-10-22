@@ -16,7 +16,8 @@ public static class DestinationText
         DestinationCategory.Sections => LangFile.Get("wt.dest.cat_sections", "Districts"),
         DestinationCategory.Lift => LangFile.Get("wt.dest.cat_lift", "Lifts"),
         DestinationCategory.Access => LangFile.Get("wt.dest.cat_access", "Ladders and doors nearby"),
-        DestinationCategory.Shops => LangFile.Get("wt.dest.cat_shops", "Shops and services"),
+        DestinationCategory.KnownPlaces => LangFile.Get("wt.dest.cat_known_places", "Places by name"),
+        DestinationCategory.Travel => LangFile.Get("wt.dest.cat_travel", "Fast travel"),        DestinationCategory.Shops => LangFile.Get("wt.dest.cat_shops", "Shops and services"),
         DestinationCategory.Masters => LangFile.Get("wt.dest.cat_masters", "Masters"),
         DestinationCategory.Missions => LangFile.Get("wt.dest.cat_missions", "Missions"),
         DestinationCategory.Jobs => LangFile.Get("wt.dest.cat_jobs", "Jobs"),
@@ -24,6 +25,10 @@ public static class DestinationText
         DestinationCategory.Pins => LangFile.Get("wt.dest.cat_pins", "Map markers"),
         _ => LangFile.Get("wt.dest.cat_saved", "My places"),
     };
+
+    public static string FastTravelKind() => LangFile.Get("wt.map.icon_fast_travel", "fast travel");
+    public static string RestKind() => LangFile.Get("wt.map.icon_home", "change day or night");
+    public static string BeaconCancelled() => LangFile.Get("wt.dest.beacon_cancelled", "Beacon cancelled. Free exploration");
 
     /// <summary>"Shops and services, 12" — said when a category is entered.</summary>
     public static string CategoryLine(DestinationCategory category, int count) =>
@@ -70,9 +75,32 @@ public static class DestinationText
         string.Format(LangFile.Get("wt.dest.chosen", "Destination: {0}, {1}"), label, where);
 
     public static string FollowMission() =>
-        LangFile.Get("wt.dest.follow_mission", "Following the story objective again");
+        LangFile.Get("wt.dest.follow_mission", "Following the tracked mission");
 
-    public static string MissionEntry() => LangFile.Get("wt.dest.mission_entry", "Story objective");
+    public static string MissionEntry() => LangFile.Get("wt.dest.mission_entry", "Follow the tracked mission");
+
+    public static string ExploreEntry() => LangFile.Get("wt.dest.explore_entry", "Explore freely");
+
+    public static string ListenCityEntry() => LangFile.Get("wt.dest.listen_city_entry", "Listen across the city");
+
+    public static string CityListening() => LangFile.Get("wt.dest.city_listening",
+        "City listening. Turn to hear known places. Sounds mark their location, not a walking route. R3 or V chooses; Explore freely returns nearby");
+
+    public static string Exploring() => LangFile.Get("wt.dest.exploring",
+        "Exploring freely. Look around to hear nearby places. Tap R3 or V after a place name to follow it");
+
+    public static string ExploreNoSelection() => LangFile.Get("wt.dest.explore_no_selection",
+        "Exploring freely. Look around to choose a place, or hold R3 or V for destinations");
+
+    public static string RouteRefreshing() => LangFile.Get("wt.dest.route_refreshing",
+        "Refreshing the route. Wait a moment and try again");
+
+    public static string RouteUnavailable() => LangFile.Get("wt.dest.route_unavailable",
+        "No walking route is confirmed yet. Try again in a moment");
+
+    public static string RouteUnconfirmed(string name, int meters) =>
+        string.Format(LangFile.Get("wt.dest.route_unconfirmed",
+            "Walking route unconfirmed. Direction only: {0}, {1} meters"), name, meters);
 
     /// <summary>One entry of the mission history: the mission's own title and its chapter — the
     /// story's own numbering, not a count of list rows, so an entry keeps the same number after

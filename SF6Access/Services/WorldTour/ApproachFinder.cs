@@ -63,12 +63,14 @@ public static class ApproachFinder
     private static bool _have;
     private static float _tx, _ty, _tz, _py;
 
-    // How far through the candidate list we are, and the answer if we have one.
-    private static int _probe;
+    // How far through the candidate list we are, and the answer if we have one. The INDEX and the
+    // retry discipline live in <see cref="Progress"/> (upstream's backoff state machine, checked
+    // by tests); the LIST stays ours — two heights, nearest-first — because asking only at the
+    // player's height is the bug 2026-10-07 fixed.
+    private static readonly ApproachProbeProgress Progress = new(FieldNavPath.MinQueryIntervalMs);
     /// <summary>How many candidates the list currently being walked actually holds. Set on every
     /// probe from the list itself; see <see cref="Exhausted"/>.</summary>
     private static int _total;
-    private static bool _found;
     private static float _ax, _ay, _az;
     private static bool _exhaustedLogged;
 
@@ -79,7 +81,8 @@ public static class ApproachFinder
 
     /// <summary>True once a reachable stand-in has been found for the current
     /// objective.</summary>
-    public static bool HasSubstitute => _found;
+    public static bool HasSubstitute => Progress.Found;
+    internal static bool WaitingForQuery { get; private set; }
 
     /// <summary>Every candidate this search has to offer has been asked and none of them routed: there
     /// is nothing walkable near the objective at either height.
@@ -90,7 +93,7 @@ public static class ApproachFinder
     /// upper bound — would never be reached on the short list and this would stay false for ever.
     /// Exhausted being false is what keeps the beacon saying "searching" instead of reporting
     /// anything, so getting it wrong here does not misinform, it silences.</para></summary>
-    public static bool Exhausted => !_found && _probe >= _total && _probe > 0;
+    public static bool Exhausted => !Progress.Found && Progress.Candidate >= _total && Progress.Candidate > 0;
 
     /// <summary>The player has stood at the stand-in; from then on it has done its job (cleared with the search).</summary>
     public static bool Arrived { get; private set; }
@@ -102,8 +105,9 @@ public static class ApproachFinder
                               out float ax, out float ay, out float az)
     {
         ax = ay = az = 0f;
+        if (!ValidQuery(tx, ty, tz, py)) return false;
         Retarget(tx, ty, tz, py);
-        if (!_found) return false;
+        if (!Progress.Found) return false;
         ax = _ax; ay = _ay; az = _az;
         return true;
     }
@@ -113,11 +117,14 @@ public static class ApproachFinder
     public static bool Probe(float tx, float ty, float tz, float px, float py, float pz,
                              float longestM = float.PositiveInfinity)
     {
+        WaitingForQuery = false;
+        if (!ValidQuery(tx, ty, tz, py) || !float.IsFinite(px) || !float.IsFinite(pz)
+            || float.IsNaN(longestM) || longestM < 0f) return false;
         Retarget(tx, ty, tz, py);
-        if (_found) return true;
+        if (Progress.Found) return true;
         var candidates = Candidates(tx, ty, tz, py);
         _total = candidates.Count;
-        if (_probe >= candidates.Count)
+        if (Progress.Candidate >= candidates.Count)
         {
             if (!_exhaustedLogged)
             {
@@ -128,21 +135,28 @@ public static class ApproachFinder
             return false;
         }
 
-        var c = candidates[_probe];
-        _probe++;
+        long now = Environment.TickCount64;
+        if (!Progress.Ready(now)) return false;
+        var c = candidates[Progress.Candidate];
 
         // The candidate's OWN height, not the player's. See Candidates: a ring asked only at the
         // player's level answered questions about the roof they were standing on, never about the
         // floor the objective was actually on.
         var answer = FieldNavPath.TryReach(c.x, c.y, c.z);
-        // Throttled means the query never ran, and a player off the navmesh (on a ladder,
-        // mid-jump) says nothing about the candidate: give it back for the next tick.
-        if (answer.Throttled || (answer.Ok && answer.StartOffMesh)) { _probe--; return false; }
-        if (!answer.Ok || !answer.Exists || answer.PathM > longestM) return false;
+        // Neither missing data nor an off-mesh player establishes that a candidate is unreachable.
+        // The shared scheduler retries a throttled probe at the native gate, which may be sooner
+        // than one interval.
+        if (answer.Throttled) { WaitingForQuery = true; return false; }
+        if (answer.Ok && answer.StartOffMesh)
+        { Progress.Record(ApproachProbeProgress.Verdict.Deferred, now); return false; }
+        if (!answer.Ok || (answer.Exists && (!float.IsFinite(answer.PathM) || answer.PathM < 0f)))
+        { Progress.Record(ApproachProbeProgress.Verdict.Unavailable, now); return false; }
+        if (!answer.Exists || answer.PathM > longestM)
+        { Progress.Record(ApproachProbeProgress.Verdict.Rejected, now); return false; }
 
-        _found = true;
+        Progress.Record(ApproachProbeProgress.Verdict.Reached, now);
         _ax = c.x; _ay = c.y; _az = c.z;
-        API.LogInfo($"[SF6Access] Approach: probe {_probe} of {candidates.Count} reached " +
+        API.LogInfo($"[SF6Access] Approach: probe {Progress.Candidate + 1} of {candidates.Count} reached " +
                     $"({c.x:0.0}, {c.y:0.0}, {c.z:0.0}) - guiding there instead of the objective, " +
                     "which is on a disconnected piece of navmesh");
         return true;
@@ -223,9 +237,8 @@ public static class ApproachFinder
         _have = true;
         Arrived = false;
         _tx = tx; _ty = ty; _tz = tz; _py = py;
-        _probe = 0;
         _total = 0;
-        _found = false;
+        Progress.Reset();
         _exhaustedLogged = false;
     }
 
@@ -240,9 +253,13 @@ public static class ApproachFinder
     /// <summary>Forget everything (left the field, new city).</summary>
     public static void Reset()
     {
-        _have = _found = _exhaustedLogged = false;
+        _have = _exhaustedLogged = false;
+        WaitingForQuery = false;
         Arrived = false;
-        _probe = 0;
         _total = 0;
+        Progress.Reset();
     }
+
+    private static bool ValidQuery(float tx, float ty, float tz, float py)
+        => float.IsFinite(tx) && float.IsFinite(ty) && float.IsFinite(tz) && float.IsFinite(py);
 }

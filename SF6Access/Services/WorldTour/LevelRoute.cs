@@ -75,6 +75,7 @@ internal static class LevelRoute
 
     /// <summary>A partial plan has been climbed: the ladders go no nearer, the rest is up to the player.</summary>
     internal static bool AtClosest => _closest;
+    internal static bool BackgroundSearch => _phase == Phase.Searching && _silent;
 
     /// <summary>True while a ladder search is running. The beacon says so out loud: a thirty-second
     /// search in silence is indistinguishable from a hung mod.</summary>
