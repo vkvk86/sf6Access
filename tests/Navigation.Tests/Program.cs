@@ -253,4 +253,113 @@ Check(PlaceFile.TryParse(PlaceFile.Format(entry with { Name = "a\tb\nc" }), out 
 Check(!PlaceFile.TryParse("400\t2\t7\tName\tx\t0\t0", out _), "a bad number is refused");
 Check(!PlaceFile.TryParse("400\t2\t7\t \t1\t0\t0", out _), "an empty name is refused");
 Check(!PlaceFile.TryParse("400\t2\tName\t1\t0\t0", out _), "a short line is refused");
+
+// --- Orientation: zone bounce gate (Seaside Street / Buckler edge, 2026-09-27) ---
+var zoneGate = new ZoneAnnounceGate(30000, 3000);
+Check(!zoneGate.IsBounce(408, 5000) && zoneGate.DueAt(408, 5000) == 5000, "a section entered for the first time is announced at once");
+zoneGate.Spoke(408, 5000);
+zoneGate.Spoke(409, 11000);
+Check(zoneGate.IsBounce(408, 14700) && zoneGate.DueAt(408, 14700) == 17700, "walking back within the window waits for a stay");
+Check(!zoneGate.IsBounce(408, 35001), "after the window a section is fresh again");
+Check(!zoneGate.IsBounce(0, 100), "no section is never a bounce");
+zoneGate.Clear();
+Check(zoneGate.DueAt(409, 7000) == 7000, "clearing forgets what was heard");
+
+// --- Free navigation: look sweep cone ---
+var cone = new ConeSweep(15, 30);
+cone.BeginPoll();
+Check(cone.Offer("shop", 10) && !cone.Offer("park", 20), "a place enters within half an hour, not beyond");
+cone.EndPoll();
+cone.BeginPoll();
+Check(!cone.Offer("shop", 25) && cone.Contains("shop"), "wobbling inside the leave angle is not a new entry");
+cone.EndPoll();
+cone.BeginPoll();
+Check(!cone.Offer("shop", 40) && !cone.Contains("shop"), "turning a full hour away leaves the cone");
+cone.EndPoll();
+cone.BeginPoll();
+cone.Offer("park", 0);
+cone.EndPoll();
+cone.BeginPoll();
+cone.EndPoll();
+Check(!cone.Contains("park"), "a place no longer offered is forgotten");
+cone.BeginPoll();
+Check(cone.Offer("park", 0) && !cone.Offer("park", 0), "a forgotten place enters again, but once");
+cone.EndPoll();
+
+// --- Free navigation: passing by ---
+var passing = new ProximityMemory(12, 24);
+Check(!passing.IsNews("salon", 30), "far away is not news");
+Check(passing.IsNews("salon", 11), "coming within range is news");
+passing.Announced("salon");
+Check(!passing.IsNews("salon", 5) && !passing.IsNews("salon", 20), "announced once, silent at the edge");
+Check(!passing.IsNews("salon", 25) && passing.IsNews("salon", 10), "walking well away re-arms it");
+
+// --- Free navigation: look-around versus drift ---
+var turnDetector = new CameraTurnDetector(15);
+Check(!turnDetector.Sample(0, 1, 0), "the first sample is never a turn");
+Check(!turnDetector.Sample(0.0349f, 0.9994f, 1000), "two degrees in a second is drift");
+Check(turnDetector.Sample(0.5f, 0.866f, 1100), "about twenty-eight degrees in a tenth of a second is a look");
+turnDetector.Reset();
+Check(!turnDetector.Sample(1, 0, 1200), "after a reset the next sample is not a turn");
+Check(!turnDetector.Sample(0, 1, 1300, 1250), "a turn that started inside the mod's own aim is not a look");
+Check(turnDetector.Sample(1, 0, 1400, 1250), "the next turn after the aim window is a look");
+
+// --- Soundscape: access sonar rota ---
+Check(SonarRota.Pick(0, 3, 5) == -1, "nothing near, nothing plays");
+Check(SonarRota.Pick(1, 3, 7) == 0, "a single access plays every turn");
+Check(SonarRota.Pick(5, 3, 0) == 0 && SonarRota.Pick(5, 3, 1) == 1 && SonarRota.Pick(5, 3, 2) == 2
+      && SonarRota.Pick(5, 3, 3) == 0, "only the three nearest take turns");
+Check(SonarRota.Volume(2, 4, 25, 0.4f, 0.12f) == 0.4f, "inside the arrival band the cue is loudest");
+Check(Math.Abs(SonarRota.Volume(25, 4, 25, 0.4f, 0.12f) - 0.12f) < 1e-6f, "at the edge of range it is quiet, not silent");
+Check(SonarRota.Volume(14.5f, 4, 25, 0.4f, 0.12f) is > 0.12f and < 0.4f, "in between it fades with distance");
+Check(SonarRota.Gap(2, 4, 100, 250, 2000) == 250, "close up the cue repeats fastest");
+Check(SonarRota.Gap(150, 4, 100, 250, 2000) == 2000, "beyond reach it repeats slowest");
+Check(SonarRota.Gap(52, 4, 100, 250, 2000) is > 250 and < 2000, "in between it slows with distance");
+
+// --- Soundscape: dead ahead (beacon on-course pitch) ---
+Check(Math.Abs(AxisLatch.OffDeg(1, 0)) < 1e-4f && Math.Abs(AxisLatch.OffDeg(0, 1) - 90) < 1e-3f
+      && Math.Abs(AxisLatch.OffDeg(-1, 0) - 180) < 1e-3f, "degrees off straight ahead, either side");
+var axis = new AxisLatch(15, 20);
+float Ahead(float deg) => MathF.Cos(deg * MathF.PI / 180);
+float Right(float deg) => MathF.Sin(deg * MathF.PI / 180);
+Check(!axis.Update(Ahead(18), Right(18)), "eighteen degrees off is not yet on course");
+Check(axis.Update(Ahead(-10), Right(-10)), "ten degrees to the left is on course");
+Check(axis.Update(Ahead(18), Right(18)), "once on course, eighteen degrees still is (no flicker)");
+Check(!axis.Update(Ahead(25), Right(25)), "twenty-five degrees off leaves it");
+Check(!axis.Update(Ahead(180), Right(0)), "behind is never on course");
+
+// --- Soundscape: the sonar flashlight ---
+var focus = new SonarFocus(15, 20);
+focus.Begin(); focus.Offer("salon", 40, 10); focus.Offer("plaza", 90, 5);
+Check(!focus.End() && focus.Key == null, "nothing pointed at, no focus");
+focus.Begin(); focus.Offer("plaza", 5, 80); focus.Offer("ladder", 12, 9);
+Check(focus.End() && focus.Key == "ladder", "the nearest thing in the cone takes the focus");
+focus.Begin(); focus.Offer("plaza", 0, 80); focus.Offer("ladder", 18, 9);
+Check(!focus.End() && focus.Key == "ladder", "kept while it stays inside the wider cone");
+focus.Begin(); focus.Offer("plaza", 0, 80); focus.Offer("ladder", 25, 9);
+Check(focus.End() && focus.Key == "plaza", "leaving the wider cone hands over to what is ahead now");
+focus.Begin(); focus.Offer("salon", 40, 10);
+Check(!focus.End() && focus.Key == null, "turning away from everything drops the focus, silently");
+focus.Begin(); focus.Offer("plaza", 3, 80);
+focus.End(); focus.Clear();
+Check(focus.Key == null, "clearing forgets the focus");
+focus.Begin(); focus.Offer("plaza", 3, 80);
+Check(focus.End(), "after a clear the same thing is new again");
+RouteGuidanceChecks.Run(Check);
+PlaceRouteMemoryChecks.Run(Check);
+SpokenDestinationChecks.Run(Check);
+SpokenFocusChecks.Run(Check);
+LookRetargetChecks.Run(Check);
+DestinationWorkflowChecks.Run(Check);
+TravelDestinationChecks.Run(Check);
+RestDestinationChecks.Run(Check);
+FacilityMemoryChecks.Run(Check);
+MapLandmarkChecks.Run(Check);
+CityPlaceChecks.Run(Check);
+CityListeningModeChecks.Run(Check);
+ApproachProbeChecks.Run(Check);
+FieldFeedbackTests.Run(Check);
+RadarCueChecks.Run(Check);
+HeadingAnnouncementChecks.Run(Check);
+ActorTrackingChecks.Run(Check);
 Console.WriteLine($"Passed {passed} navigation checks.");

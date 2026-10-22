@@ -2,18 +2,44 @@
 
 > Per-mod status ledger / dashboard. Open this first when resuming the mod so progress isn't re-derived from the code each session. Keep it short — a dashboard, not docs. Update the **Next step** line and the section table whenever you finish a chunk. Derive every value from the game's real data — no guessed offsets.
 
-**Last updated:** 2026-09-27
+**Last updated:** 2026-10-01
 
-**Next step (2026-09-27): test the orientation pass** (`docs/wt-orientation.md`, checklist §6). Built,
-0 warnings, 93 pure checks pass, adversarially reviewed (9 findings fixed), **nothing verified in game**. (1) Zones announced while walking: the
-section id was 0 in every session because `CitySectionManager` is not a singleton (it lives in
-`GuiManager.AccessData`); now read there, the game's section banner is hooked, and a landmark region
-("zona de Beat Square", with hysteresis) is the fallback. (2) Z = where am I: zone, nearest landmark with
-direction, facing, destination. (3) **Hold R3 / V = destination picker** (tap still aims, on release):
-categories nearest-first from the mission, fast-travel points, nearby people, the game's map registry,
-a saved snapshot of the phone map and the player's own saved spots; choosing one drives the existing
-beacon, route and ladder guidance, and now survives menus and street fights (it used to be cleared).
-Report the log lines listed in the checklist.
+**Next step: user tests Places by name and Guidance / Listen across the city. Do not launch the game.**
+The user chose both named selection and recognizing distant places while exploring. Known fixed places
+now have an alphabetical view and an optional citywide look mode: one heard name, category sound and
+R3 target; selecting exits the survey and starts normal guidance. Default local exploration is retained.
+Facilities continue learning after the first discovery; cached places are scoped by city/situation.
+Release built/deployed, 0 warnings/errors; 520 navigation checks pass. Native listening test pending.
+Coverage is known locations, not every unvisited city facility; phone-map capture remains unverified.
+See [controls, coverage, design and test checklist](docs/wt-city-listening.md).
+
+Previous R3 universal cancellation and native rest/day-night category are also awaiting a live test.
+Check the room-associated travel point versus the actual door and My Room's newly watched `TimeList`.
+The unchanged audio passed 283 checks; the player confirms its object sounds are easier to distinguish.
+
+**Remaining:** listen at the player's speech rate; verify local walking previews, fast-travel contact,
+R3 recovery after loss, walking/corners, live NPC contact/loss,
+fight return and Boluo's partial roof route. Phone-map empty/day-night freshness and native action
+prompt coverage remain unresolved. No gameplay completion or runtime usability claim is made.
+
+**Earlier prototype history (superseded behavior is retained below as evidence):**
+
+**Next step (2026-09-27, latest): test navigating by ear without R3** (`docs/wt-soundscape.md` §6
+pass 2 and §8). Tester: "quisiera navegar con algo que no dependiese del R3… sonificar más el mundo".
+Built, 135 pure checks, NOT verified in game: `WorldSonarHooks` (was `AccessSonarHooks`) gives earcons
+to ladders, doors, shops (`sounds/shop.mp3`) and places (`sounds/place.mp3`, fast travel, saved spots,
+pins) — the thing the camera points at (±15°, to 100 m) plays alone and speeds up as you approach
+(flashlight), otherwise the 3 nearest within 25 m take turns quietly; Shift+N toggles. Every homing
+beacon now plays a fifth higher when dead ahead (`HomingCue` on-course), so the right stick replaces
+R3 for aiming. Also still untested: the ladder/door pass and the look sweep below.
+
+**Next step (2026-09-27): test navigating without a menu** (`docs/wt-free-navigation.md`, §6).
+Built, 113 pure checks, adversarially reviewed (8 fixes), NOT verified in game: turning the camera while standing names places ahead
+(`FieldPlaceSweepHooks`), a tap of R3 right after makes that place the destination; walking past a place
+within 12 m names it once (`FieldPassingHooks`). Polish from the test: zone banners no longer bounce at
+an edge (`ZoneAnnounceGate`), R3 keeps its camera calibration across menus and fights. Proposed, needs
+the tester's decision: continuous guidance (the camera follows the route while walking, replacing the
+R3-every-second habit seen in the log).
 
 **Test 2026-09-27 (orientation pass): WORKS, needs polish** (tester: "está bien, hay que pulirlo").
 Confirmed in game: section id through `GuiManager.AccessData` (`Section id 410 read through manager`),
@@ -140,6 +166,7 @@ Analysis/documentation only; no code changes, build or new in-game verification.
 
 | Section / feature | Status | Notes |
 |---|---|---|
+| World Tour — audio exploration and optional guidance | wip | First listening test exposed over-suppression; follow-up built, 300 checks pass, listening pending. `docs/wt-soundscape.md`. |
 | Main menu / Fighting Ground / tabs | done | `MainMenuHooks`, `FGMenuHooks`; fg/bh/wt tabs |
 | Options menu (+ sub-screens) | done | `OptionMenuHooks`, `OptionSubScreenHooks`; `OptionManager` polling |
 | Key config | done | `KeyConfigHooks` |
@@ -159,7 +186,9 @@ Analysis/documentation only; no code changes, build or new in-game verification.
 | World Tour — phone map | wip | Built 2026-09-07 from the F8 capture `sf6access_autodump_154237.txt` (lines 770-965): `Hooks/WorldTour/DeviceMapHooks.cs` + `Services/WorldTour/DeviceMapText.cs` on `app.UIFlowWTDeviceMap.MapParam`. Speaks the location + guide message on entry, then flow-state changes ("Map" / "Fast travel list"), the icon under the free cursor ("Beat Square, shop"), the highlighted fast-travel point ("name, 2 of 7") and the marker info panel. Icon kinds come from `ICON_TYPE` member NAMES mapped to nine family words (`wt.map.icon_*` in `lang/en.txt` + `es.txt`). **PENDING IN-GAME VERIFICATION** — checklist below. The world map (`app.UIFlowWorldMap`) is still untouched |
 | World Tour — map-selection aiming + route guidance | wip | Built 2026-09-09, **NOTHING VERIFIED IN GAME**. `Hooks/WorldTour/FieldTrackerHooks.cs` on `Services/WorldTour/{MapIcon, MapIconCatalog, TrackerSelection, TrackerButtons, FieldInputMask, BeaconDestination}.cs`. R3/V opens a modal list of everything the HUD minimap is showing (`app.UIMiniMapWindow.mIconInfoList`, real `IconInfo.GlobalPos` world positions); d-pad up/down or the arrows cycle targets nearest-first, L1/R1 or PageUp/PageDown cycle the game's own `ICON_GROUP_TYPE` categories. The chosen icon takes over the mission beacon; the game removing its icon is what triggers auto-retracking to the next of the same category. **Shift+V turns on `FieldNavPath`** (inert since 2026-09-08) so the beacon aims at the route's first corner. See `docs/sf6-screens.md` § World Tour minimap tracker + route guidance |
 | World Tour — multi-level routes (ladders) | wip | Built 2026-09-22, NOT verified in game. `LevelRoute` + `LevelRoutePlanner` + `LadderCatalog`: walk → ladder → walk when the objective's navmesh island is disconnected. `docs/sf6-screens.md` § multi-level routes |
-| World Tour — orientation (zones, where am I, destination picker) | wip | Built 2026-09-27, NOT verified in game. `ZoneHooks`, `SectionNoticeHooks`, `DestinationPickerHooks`; `docs/wt-orientation.md` |
+| World Tour — orientation (zones, where am I, destination picker) | wip | Confirmed working in game 2026-09-27 (needs polish). `ZoneHooks`, `SectionNoticeHooks`, `DestinationPickerHooks`; `docs/wt-orientation.md` |
+| World Tour — free navigation (look sweep for places, passing by) | wip | Built 2026-09-27, NOT verified in game. `FieldPlaceSweepHooks`, `FieldPassingHooks`; `docs/wt-free-navigation.md` |
+| World Tour — soundscape (world sonar, on-course beacons) | wip | Built 2026-09-27, NOT verified in game. `WorldSonarHooks`, `HomingCue`; `docs/wt-soundscape.md` |
 | World Tour full flow | todo | Next big goal; shared avatar menus not yet verified in WT |
 
 ## Derived facts (so we never re-RE them)
@@ -184,6 +213,18 @@ records that survive a machine change.)
 - Shop Enhance/Dye side panes still unread.
 
 **Built but not yet verified in game**
+- **Battle notices read aloud, 2026-10-16** (`BattleNoticeHooks`). VERIFIED in training: the game's
+  text is read once per banner (STUN, PUNISH COUNTER, COUNTER HIT after enabling them in
+  `plugins\managed\SF6Access.notices.txt`, applied without a restart). Still unverified: online
+  rollback not repeating a banner; what the LOCK notice is.
+- **Training Attack Data + frame data aligned with the sighted readout, 2026-10-16.** Detection was
+  verified with a live probe (`docs/sf6-screens.md` § Training live display state); the built readouts
+  still need an in-game pass. Expected: a single hit says "700. High" EVERY time (identical repeats
+  included); a combo says "1230. 4 hits. scaling 60%"; the dummy hitting you is prefixed "Opponent";
+  frame data is ONE line per exchange — "You: Startup 6F / Total 22F / Advantage 1F", or
+  "Opponent: …" when the dummy attacked — a whiff drops the "Advantage --"; walking/dashing is silent.
+  Unverified: the attack-type Guid (`attackInfo`) resolving to text; a dummy attack (recording/CPU)
+  producing the "Opponent" variants.
 - **`ZoneNameService` now ENUMERATES the section table instead of looking it up by key, 2026-09-10.**
   `CitySectionDataUserDataDict` is keyed by `ManageId`, which is not guaranteed to be the section id.
   The old route asked `get_Item(sectionId)` and then cross-checked the record's own `id`; that check was
